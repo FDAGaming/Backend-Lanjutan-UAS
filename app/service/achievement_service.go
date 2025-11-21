@@ -1,10 +1,75 @@
 package service
 
 import (
+	"math"
 	"uas/app/model"
 	"uas/app/repository"
 	"github.com/gofiber/fiber/v2"
 )
+
+// FR-010 & Modul 6: Get All Achievements (Pagination, Sort, Search)
+func (s *AchievementService) GetAll(c *fiber.Ctx) error {
+	// 1. Parsing Query Parameter (Modul 6)
+	page := c.QueryInt("page", 1)
+	limit := c.QueryInt("limit", 10)
+	sortBy := c.Query("sortBy", "created_at")
+	order := c.Query("order", "desc")
+	search := c.Query("search", "")
+
+	// Masukkan ke struct param
+	param := model.PaginationParam{
+		Page:   page,
+		Limit:  limit,
+		SortBy: sortBy,
+		Order:  order,
+		Search: search,
+	}
+
+	// 2. Cek Role Login (RBAC Logic)
+	// Jika Mahasiswa -> Hanya lihat data sendiri
+	// Jika Admin/Dosen -> Bisa lihat semua (logic disederhanakan)
+	userRole := c.Locals("role").(string)
+	userID := c.Locals("user_id").(string)
+	
+	filterStudentID := ""
+	if userRole == "Mahasiswa" {
+		// Cari studentID berdasarkan userID
+		student, err := s.userRepo.FindStudentByUserID(userID)
+		if err == nil {
+			filterStudentID = student.ID
+		}
+	}
+
+	// 3. Panggil Repository
+	data, total, err := s.achRepo.FindAll(param, filterStudentID)
+	if err != nil {
+		return c.Status(500).JSON(model.WebResponse{
+			Code:    500,
+			Status:  "error",
+			Message: err.Error(),
+		})
+	}
+
+	// 4. Hitung Metadata Pagination (Modul 6)
+	totalPages := int(math.Ceil(float64(total) / float64(limit)))
+
+	// 5. Return Response
+	return c.JSON(model.WebResponse{
+		Code:    200,
+		Status:  "success",
+		Message: "Data berhasil diambil",
+		Data:    data,
+		Meta: &model.MetaInfo{
+			Page:      page,
+			Limit:     limit,
+			TotalData: total,
+			TotalPage: totalPages,
+			SortBy:    sortBy,
+			Order:     order,
+			Search:    search,
+		},
+	})
+}
 
 type AchievementService struct {
 	achRepo  *repository.AchievementRepository
@@ -47,9 +112,10 @@ func (s *AchievementService) Submit(c *fiber.Ctx) error {
 
 	// 5. Mapping ke Model Postgres
 	ref := model.AchievementReference{
-		StudentID: student.ID,
-		Status:    "draft",
-	}
+        StudentID: student.ID,
+        Status:    "draft",
+        Title:     req.Title, // PENTING: Simpan judul di Postgres untuk sorting!
+    }
 
 	// 6. Simpan ke Database (Repo Hybrid)
 	if err := s.achRepo.Create(c.Context(), &content, &ref); err != nil {

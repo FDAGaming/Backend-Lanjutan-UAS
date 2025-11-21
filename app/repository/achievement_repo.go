@@ -1,6 +1,8 @@
 package repository
 
 import (
+	// "math"
+	"strings"
 	"context"
 	"errors"
 	"uas/app/model"
@@ -89,4 +91,49 @@ func (r *AchievementRepository) UpdateStatus(id string, status string, verifiedB
 	}
 
 	return r.pgDB.Model(&model.AchievementReference{}).Where("id = ?", id).Updates(updates).Error
+}
+func (r *AchievementRepository) FindAll(param model.PaginationParam, studentID string) ([]model.AchievementReference, int64, error) {
+	var achievements []model.AchievementReference
+	var total int64
+
+	// 1. Inisialisasi Query DB
+	query := r.pgDB.Model(&model.AchievementReference{}).Preload("Student.User")
+
+	// 2. Filter: Jika yang login Mahasiswa, hanya tampilkan punya dia
+	if studentID != "" {
+		query = query.Where("student_id = ?", studentID)
+	}
+
+	// 3. Implementasi Search (Modul 6)
+	// Mencari berdasarkan Judul Prestasi ATAU Status (Case Insensitive / ILIKE)
+	if param.Search != "" {
+		searchLike := "%" + strings.ToLower(param.Search) + "%"
+		query = query.Where("LOWER(title) LIKE ? OR LOWER(status) LIKE ?", searchLike, searchLike)
+	}
+
+	// 4. Hitung Total Data (untuk Meta Pagination)
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	// 5. Implementasi Sorting (Modul 6)
+	// Default sort by created_at desc
+	orderBy := "created_at"
+	orderDirection := "desc"
+
+	if param.SortBy != "" {
+		orderBy = param.SortBy // misal: "title", "status"
+	}
+	if strings.ToLower(param.Order) == "asc" {
+		orderDirection = "asc"
+	}
+	query = query.Order(orderBy + " " + orderDirection)
+
+	// 6. Implementasi Pagination (Limit & Offset)
+	offset := (param.Page - 1) * param.Limit
+	query = query.Limit(param.Limit).Offset(offset)
+
+	// 7. Eksekusi Query
+	err := query.Find(&achievements).Error
+	return achievements, total, err
 }

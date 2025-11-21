@@ -2,7 +2,7 @@ package model
 
 import (
 	"time"
-	"gorm.io/gorm"
+	// "gorm.io/gorm"
 )
 
 // SRS 3.1.1 & 3.1.2
@@ -30,7 +30,7 @@ type Student struct {
 	ID           string    `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
 	UserID       string    `gorm:"type:uuid;unique;not null" json:"userId"`
 	User         User      `gorm:"foreignKey:UserID" json:"user,omitempty"`
-	StudentID    string    `gorm:"unique;not null" json:"studentId"` // NIM
+StudentID    string    `gorm:"unique;not null;type:varchar(20)" json:"studentId"` // NIM
 	ProgramStudy string    `json:"programStudy"`
 	AdvisorID    *string   `gorm:"type:uuid" json:"advisorId"`
 	CreatedAt    time.Time `json:"createdAt"`

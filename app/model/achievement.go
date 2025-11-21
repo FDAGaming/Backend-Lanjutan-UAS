@@ -33,12 +33,13 @@ type Attachment struct {
 type AchievementReference struct {
 	ID                 string     `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
 	StudentID          string     `gorm:"type:uuid;not null" json:"studentId"`
+	Student            Student    `gorm:"foreignKey:StudentID;references:ID" json:"student,omitempty"` // Join ke Student
 	MongoAchievementID string     `gorm:"type:varchar(24);not null" json:"mongoAchievementId"`
-	Status             string     `gorm:"type:varchar(20);default:'draft'" json:"status"` // draft, submitted, verified, rejected
-	SubmittedAt        *time.Time `json:"submittedAt"`
-	VerifiedAt         *time.Time `json:"verifiedAt"`
-	VerifiedBy         *string    `gorm:"type:uuid" json:"verifiedBy"`
-	RejectionNote      string     `gorm:"type:text" json:"rejectionNote"`
+	
+    // Tambahan field agar bisa di-Sort/Search via SQL (Modul 6)
+    Title              string     `gorm:"type:varchar(255)" json:"title"` 
+	
+    Status             string     `gorm:"type:varchar(20);default:'draft'" json:"status"`
 	CreatedAt          time.Time  `json:"createdAt"`
 	UpdatedAt          time.Time  `json:"updatedAt"`
 }
