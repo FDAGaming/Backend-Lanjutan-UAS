@@ -1,54 +1,124 @@
 package middleware
 
 import (
+	"uas/app/model"
+	"uas/app/repository"
 	"uas/utils"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
 )
 
-// Modul 5: AuthRequired Middleware
-func AuthRequired() fiber.Handler {
+type AuthMiddleware struct {
+	roleRepo *repository.RoleRepository
+}
+
+// Constructor menerima RoleRepository (Sesuai wiring di main.go)
+func NewAuthMiddleware(roleRepo *repository.RoleRepository) *AuthMiddleware {
+	return &AuthMiddleware{roleRepo: roleRepo}
+}
+
+// ==============================================================
+// Middleware 1: AuthRequired (FR-002 Step 1 & 2)
+// Memastikan User mengirim token yang valid
+// ==============================================================
+func (m *AuthMiddleware) AuthRequired() fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		// 1. Ambil Header Authorization
+		// 1. Ekstrak JWT dari header
 		authHeader := c.Get("Authorization")
 		if authHeader == "" {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"message": "Token akses diperlukan",
+			return c.Status(fiber.StatusUnauthorized).JSON(model.WebResponse{
+				Code:    401,
+				Status:  "error",
+				Message: "Missing authorization header",
 			})
 		}
 
-		// 2. Cek format "Bearer <token>"
+		// Cek format "Bearer <token>"
 		tokenParts := strings.Split(authHeader, " ")
 		if len(tokenParts) != 2 || tokenParts[0] != "Bearer" {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"message": "Format token tidak valid",
+			return c.Status(fiber.StatusUnauthorized).JSON(model.WebResponse{
+				Code:    401,
+				Status:  "error",
+				Message: "Invalid token format",
 			})
 		}
 
-		// 3. Validasi Token
-		claims, err := utils.ParseToken(tokenParts[1]) // Fungsi ini ada di utils/jwt.go (jawaban sebelumnya)
+		// 2. Validasi token
+		claims, err := utils.ParseToken(tokenParts[1])
 		if err != nil {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"message": "Token tidak valid atau expired",
+			return c.Status(fiber.StatusUnauthorized).JSON(model.WebResponse{
+				Code:    401,
+				Status:  "error",
+				Message: "Invalid or expired token",
 			})
 		}
 
-        // Casting claims ke Map/Struct yang sesuai
-        // Pastikan utils.ParseToken mengembalikan *utils.JwtClaims
-        // Disini diasumsikan Anda menyesuaikan utils/jwt.go agar me-return claims struct
-
-		// 4. Simpan data user ke Context (Locals)
-		c.Locals("user_id", claims.UserID) // ID dari tabel Users
+		// 3. Simpan data User ke Context (Locals)
+		// Agar bisa diakses di Controller/Service (c.Locals("user_id"))
+		c.Locals("user_id", claims.UserID)
 		c.Locals("role", claims.Role)
+		c.Locals("permissions", claims.Permissions) // Permissions dimuat dari Token (Cache Strategy)
 
 		return c.Next()
 	}
 }
 
-// Modul 5: Role Based Access Control (RBAC)
-// Menerima variadic parameter (bisa banyak role)
-func RolesAllowed(roles ...string) fiber.Handler {
+// ==============================================================
+// Middleware 2: PermissionRequired (FR-002 Step 4 & 5)
+// Memastikan User memiliki Permission spesifik (RBAC)
+// ==============================================================
+func (m *AuthMiddleware) PermissionRequired(requiredPerm string) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		// Ambil permissions yang sudah disimpan di Locals oleh AuthRequired
+		userPermsInterface := c.Locals("permissions")
+		if userPermsInterface == nil {
+			return c.Status(fiber.StatusForbidden).JSON(model.WebResponse{
+				Code:    403,
+				Status:  "error",
+				Message: "No permissions found in context",
+			})
+		}
+
+		// Casting ke []string
+		// utils.JwtClaims mendefinisikan Permissions sebagai []string, jadi aman dicasting
+		userPerms, ok := userPermsInterface.([]string)
+		if !ok {
+			// Fallback jika casting gagal (misal masalah decoding JSON internal)
+			return c.Status(fiber.StatusInternalServerError).JSON(model.WebResponse{
+				Code:    500,
+				Status:  "error",
+				Message: "Failed to parse user permissions",
+			})
+		}
+
+		// 4. Check apakah user memiliki permission yang diperlukan
+		hasPermission := false
+		for _, p := range userPerms {
+			if p == requiredPerm {
+				hasPermission = true
+				break
+			}
+		}
+
+		// 5. Allow/deny request
+		if !hasPermission {
+			return c.Status(fiber.StatusForbidden).JSON(model.WebResponse{
+				Code:    403,
+				Status:  "error",
+				Message: "Access denied. Missing permission: " + requiredPerm,
+			})
+		}
+
+		return c.Next()
+	}
+}
+
+// ==============================================================
+// Middleware 3: RolesAllowed (Alternatif Simple RBAC Modul 5)
+// Jika ingin mengecek Role langsung (misal: hanya "Dosen Wali")
+// ==============================================================
+func (m *AuthMiddleware) RolesAllowed(roles ...string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		userRole := c.Locals("role").(string)
 
@@ -58,8 +128,10 @@ func RolesAllowed(roles ...string) fiber.Handler {
 			}
 		}
 
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-			"message": "Akses ditolak. Anda tidak memiliki izin.",
+		return c.Status(fiber.StatusForbidden).JSON(model.WebResponse{
+			Code:    403,
+			Status:  "error",
+			Message: "Access denied. Role not authorized.",
 		})
 	}
 }

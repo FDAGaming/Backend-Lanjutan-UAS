@@ -1,31 +1,31 @@
 package utils
 
 import (
+	"errors" // [1] Tambahkan import ini
 	"os"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// Pastikan Anda sudah set JWT_SECRET di file .env nanti
 var jwtSecret = []byte(os.Getenv("JWT_SECRET"))
 
 type JwtClaims struct {
-	UserID string `json:"user_id"`
-	Role   string `json:"role"`
+	UserID      string   `json:"user_id"`
+	Role        string   `json:"role"`
+	Permissions []string `json:"permissions"`
 	jwt.RegisteredClaims
 }
 
-// GenerateToken membuat token baru yang valid selama 24 jam
-func GenerateToken(userID string, role string) (string, error) {
-	// Jika env kosong, pakai default (HANYA UTK DEVELOPMENT)
+func GenerateToken(userID string, role string, permissions []string) (string, error) {
 	if len(jwtSecret) == 0 {
 		jwtSecret = []byte("rahasia_default_jangan_dipakai_production")
 	}
 
 	claims := JwtClaims{
-		UserID: userID,
-		Role:   role,
+		UserID:      userID,
+		Role:        role,
+		Permissions: permissions,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -36,18 +36,27 @@ func GenerateToken(userID string, role string) (string, error) {
 	return token.SignedString(jwtSecret)
 }
 
-// ParseToken memvalidasi token string dan mengembalikan object token
-func ParseToken(tokenString string) (*jwt.Token, error) {
-    // Jika env kosong, pakai default
+func ParseToken(tokenString string) (*JwtClaims, error) {
 	if len(jwtSecret) == 0 {
 		jwtSecret = []byte("rahasia_default_jangan_dipakai_production")
 	}
 
-	return jwt.ParseWithClaims(tokenString, &JwtClaims{}, func(token *jwt.Token) (interface{}, error) {
-		// Validasi method signing
+	token, err := jwt.ParseWithClaims(tokenString, &JwtClaims{}, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, jwt.ErrSignatureInvalid
+			return nil, jwt.ErrTokenSignatureInvalid // Ini ada di v5
 		}
 		return jwtSecret, nil
 	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Validasi Claims
+	if claims, ok := token.Claims.(*JwtClaims); ok && token.Valid {
+		return claims, nil
+	}
+
+	// [2] Perbaikan: Gunakan errors.New karena jwt.ErrTokenInvalid tidak ada
+	return nil, errors.New("token invalid") 
 }

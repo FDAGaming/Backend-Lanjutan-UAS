@@ -64,10 +64,12 @@ db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
 	log.Println("🔄 Menjalankan Auto Migration...")
 	err = db.AutoMigrate(
 		&model.Role{},
+		&model.Permission{},
+		&model.RolePermission{},
 		&model.User{},
-		&model.Student{},
 		&model.Lecturer{},
-		&model.AchievementReference{}, // Tabel referensi prestasi
+		&model.Student{},
+		&model.AchievementReference{},
 	)
 
 	if err != nil {
