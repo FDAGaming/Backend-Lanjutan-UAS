@@ -4,19 +4,23 @@ import "time"
 
 // Tabel students
 type Student struct {
-	ID           string    `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
+	ID           string    `json:"id" db:"id"`
 	
-	UserID       string    `gorm:"type:uuid;column:user_id" json:"userId"`
-	User         User      `gorm:"foreignKey:UserID;references:ID" json:"user,omitempty"`
+	UserID       string    `json:"userId" db:"user_id"`
+	
+	// Relasi (Tidak ada di kolom database, diisi manual via JOIN)
+	User         *User     `json:"user,omitempty" db:"-"`
 	
 	// Kolom student_id di Database (NIM)
-	StudentID    string    `gorm:"unique;not null;type:varchar(20);column:student_id" json:"studentId"` 
+	StudentID    string    `json:"studentId" db:"student_id"` 
 	
-	ProgramStudy string    `gorm:"type:varchar(100);column:program_study" json:"programStudy"`
-	AcademicYear string    `gorm:"type:varchar(10);column:academic_year" json:"academicYear"`
+	ProgramStudy string    `json:"programStudy" db:"program_study"`
+	AcademicYear string    `json:"academicYear" db:"academic_year"`
 	
-	AdvisorID    *string   `gorm:"type:uuid;column:advisor_id" json:"advisorId"`
-	Advisor      *Lecturer `gorm:"foreignKey:AdvisorID;references:ID" json:"advisor,omitempty"`
+	AdvisorID    *string   `json:"advisorId" db:"advisor_id"`
 	
-	CreatedAt    time.Time `gorm:"default:CURRENT_TIMESTAMP;column:created_at" json:"createdAt"`
+	// Relasi (Tidak ada di kolom database)
+	Advisor      *Lecturer `json:"advisor,omitempty" db:"-"`
+	
+	CreatedAt    time.Time `json:"createdAt" db:"created_at"`
 }

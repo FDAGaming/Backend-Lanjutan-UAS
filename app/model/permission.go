@@ -2,21 +2,21 @@ package model
 
 // Tabel permissions
 type Permission struct {
-	ID          string `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
-	Name        string `gorm:"unique;not null;type:varchar(100)" json:"name"`
-	Resource    string `gorm:"not null;type:varchar(50)" json:"resource"`
-	Action      string `gorm:"not null;type:varchar(50)" json:"action"`
-	Description string `gorm:"type:text" json:"description"`
+	ID          string `json:"id" db:"id"`
+	Name        string `json:"name" db:"name"`
+	Resource    string `json:"resource" db:"resource"`
+	Action      string `json:"action" db:"action"`
+	Description string `json:"description" db:"description"`
 }
 
 // Tabel role_permissions
 type RolePermission struct {
-	RoleID       string     `gorm:"primaryKey;type:uuid;column:role_id" json:"roleId"`
-	PermissionID string     `gorm:"primaryKey;type:uuid;column:permission_id" json:"permissionId"`
+	RoleID       string      `json:"roleId" db:"role_id"`
+	PermissionID string      `json:"permissionId" db:"permission_id"`
 	
-	// Relasi (Optional, agar GORM tahu link-nya)
-	Role         Role       `gorm:"foreignKey:RoleID;references:ID" json:"-"`
-	Permission   Permission `gorm:"foreignKey:PermissionID;references:ID" json:"-"`
+	// Relasi (Tidak ada di kolom database, diisi manual via JOIN)
+	Role         *Role       `json:"role,omitempty" db:"-"`
+	Permission   *Permission `json:"permission,omitempty" db:"-"`
 }
 
 // Override nama tabel agar tidak di-pluralize otomatis (menjadi role_permissions)

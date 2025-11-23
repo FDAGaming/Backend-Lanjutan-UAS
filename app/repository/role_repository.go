@@ -1,35 +1,83 @@
 package repository
 
 import (
+	"database/sql"
+	"errors"
 	"uas/app/model"
-
-	"gorm.io/gorm"
 )
 
 type RoleRepository struct {
-	db *gorm.DB
+	db *sql.DB
 }
 
-func NewRoleRepository(db *gorm.DB) *RoleRepository {
+func NewRoleRepository(db *sql.DB) *RoleRepository {
 	return &RoleRepository{db: db}
 }
 
 // Mencari Role berdasarkan nama (misal: untuk default role saat register)
 func (r *RoleRepository) FindByName(name string) (*model.Role, error) {
+	query := `
+		SELECT id, name, description, created_at 
+		FROM roles 
+		WHERE name = $1 
+		LIMIT 1`
+
 	var role model.Role
-	err := r.db.Where("name = ?", name).First(&role).Error
-	return &role, err
+	// Kita harus scan manual karena tidak ada GORM/SQLX
+	// Pastikan urutan variabel Scan sama dengan urutan kolom di SELECT
+	err := r.db.QueryRow(query, name).Scan(
+		&role.ID,
+		&role.Name,
+		&role.Description,
+		&role.CreatedAt,
+	)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, errors.New("role not found")
+		}
+		return nil, err
+	}
+
+	return &role, nil
 }
 
 // Mengambil Permission yang dimiliki oleh sebuah Role (untuk Middleware RBAC)
 func (r *RoleRepository) GetPermissionsByRoleID(roleID string) ([]model.Permission, error) {
+	query := `
+		SELECT p.id, p.name, p.resource, p.action, p.description
+		FROM permissions p
+		JOIN role_permissions rp ON rp.permission_id = p.id
+		WHERE rp.role_id = $1`
+
+	rows, err := r.db.Query(query, roleID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
 	var permissions []model.Permission
-	
-	// Join table role_permissions dan permissions
-	err := r.db.Table("permissions").
-		Joins("JOIN role_permissions ON role_permissions.permission_id = permissions.id").
-		Where("role_permissions.role_id = ?", roleID).
-		Find(&permissions).Error
-		
-	return permissions, err
+
+	for rows.Next() {
+		var p model.Permission
+		// Scan data per baris
+		err := rows.Scan(
+			&p.ID,
+			&p.Name,
+			&p.Resource,
+			&p.Action,
+			&p.Description,
+		)
+		if err != nil {
+			return nil, err
+		}
+		permissions = append(permissions, p)
+	}
+
+	// Cek error setelah loop (penting di database/sql)
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return permissions, nil
 }

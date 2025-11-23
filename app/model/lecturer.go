@@ -4,12 +4,14 @@ import "time"
 
 // Tabel lecturers
 type Lecturer struct {
-	ID         string    `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
+	ID         string    `json:"id" db:"id"`
 	
-	UserID     string    `gorm:"type:uuid;column:user_id" json:"userId"`
-	User       User      `gorm:"foreignKey:UserID;references:ID" json:"user,omitempty"`
+	UserID     string    `json:"userId" db:"user_id"`
 	
-	LecturerID string    `gorm:"unique;not null;type:varchar(20);column:lecturer_id" json:"lecturerId"` // NIP
-	Department string    `gorm:"type:varchar(100)" json:"department"`
-	CreatedAt  time.Time `gorm:"default:CURRENT_TIMESTAMP;column:created_at" json:"createdAt"`
+	// Relasi (Tidak ada di kolom database, diisi manual via JOIN)
+	User       *User     `json:"user,omitempty" db:"-"`
+	
+	LecturerID string    `json:"lecturerId" db:"lecturer_id"` // NIP
+	Department string    `json:"department" db:"department"`
+	CreatedAt  time.Time `json:"createdAt" db:"created_at"`
 }
