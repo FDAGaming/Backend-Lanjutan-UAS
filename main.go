@@ -8,7 +8,7 @@ import (
 	"uas/app/repository"
 	"uas/route"
 	"uas/app/service"
-	"uas/database"
+	"uas/database" // Import package database untuk migration/seeder
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
@@ -24,13 +24,16 @@ func main() {
 
 	// 2. Initialize Database (Hybrid: Postgres & Mongo)
 	// Config ini otomatis melakukan Manual Migration untuk Postgres (Native SQL)
-	// Return type: *config.DatabaseInstances { Postgres: *sql.DB, Mongo: *mongo.Database }
-	db := config.InitDB()
+	db := database.InitDB()
+
+	// --- DATA SEEDING (MIGRATION) ---
+	// Jalankan seeder untuk mengisi data dummy (Roles, Users, Profiles, Achievements)
+	// Fungsi ini Idempotent (aman dijalankan berkali-kali)
+	database.SeedDummyData(db.Postgres, db.Mongo)
+	// --------------------------------
 
 	// 3. Setup Repositories (Data Access Layer)
 	// ---------------------------------------------------------
-	// NOTE: Pastikan repository Anda sudah diupdate untuk menerima *sql.DB, bukan *gorm.DB
-	
 	// RoleRepo: Menggunakan *sql.DB (Postgres)
 	roleRepo := repository.NewRoleRepository(db.Postgres)
 

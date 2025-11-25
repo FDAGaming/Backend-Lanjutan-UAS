@@ -1,4 +1,4 @@
-package config
+package database
 
 import (
 	"context"
@@ -60,7 +60,7 @@ func connectPostgres() *sql.DB {
 	// MANUAL MIGRATION
 	// Karena tidak pakai GORM, kita harus buat tabel secara manual lewat SQL
 	// Urutan pembuatan tabel PENTING karena Foreign Key
-	runManualMigration(db)
+	// runManualMigration(db)
 
 	return db
 }
@@ -91,92 +91,92 @@ func connectMongo() *mongo.Database {
 }
 
 // Fungsi untuk menjalankan DDL (Data Definition Language)
-func runManualMigration(db *sql.DB) {
-	log.Println("🔄 Menjalankan Manual Migration...")
+// func runManualMigration(db *sql.DB) {
+// 	log.Println("🔄 Menjalankan Manual Migration...")
 
-	queries := []string{
-		// 1. Enable UUID extension (jika belum aktif)
-		`CREATE EXTENSION IF NOT EXISTS "pgcrypto";`,
+// 	queries := []string{
+// 		// 1. Enable UUID extension (jika belum aktif)
+// 		`CREATE EXTENSION IF NOT EXISTS "pgcrypto";`,
 
-		// 2. Tabel roles
-		`CREATE TABLE IF NOT EXISTS roles (
-			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-			name VARCHAR(50) UNIQUE NOT NULL,
-			description TEXT,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		);`,
+// 		// 2. Tabel roles
+// 		`CREATE TABLE IF NOT EXISTS roles (
+// 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+// 			name VARCHAR(50) UNIQUE NOT NULL,
+// 			description TEXT,
+// 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+// 		);`,
 
-		// 3. Tabel permissions
-		`CREATE TABLE IF NOT EXISTS permissions (
-			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-			name VARCHAR(100) UNIQUE NOT NULL,
-			resource VARCHAR(50) NOT NULL,
-			action VARCHAR(50) NOT NULL,
-			description TEXT
-		);`,
+// 		// 3. Tabel permissions
+// 		`CREATE TABLE IF NOT EXISTS permissions (
+// 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+// 			name VARCHAR(100) UNIQUE NOT NULL,
+// 			resource VARCHAR(50) NOT NULL,
+// 			action VARCHAR(50) NOT NULL,
+// 			description TEXT
+// 		);`,
 
-		// 4. Tabel role_permissions (Many-to-Many)
-		`CREATE TABLE IF NOT EXISTS role_permissions (
-			role_id UUID REFERENCES roles(id) ON DELETE CASCADE,
-			permission_id UUID REFERENCES permissions(id) ON DELETE CASCADE,
-			PRIMARY KEY (role_id, permission_id)
-		);`,
+// 		// 4. Tabel role_permissions (Many-to-Many)
+// 		`CREATE TABLE IF NOT EXISTS role_permissions (
+// 			role_id UUID REFERENCES roles(id) ON DELETE CASCADE,
+// 			permission_id UUID REFERENCES permissions(id) ON DELETE CASCADE,
+// 			PRIMARY KEY (role_id, permission_id)
+// 		);`,
 
-		// 5. Tabel users
-		`CREATE TABLE IF NOT EXISTS users (
-			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-			username VARCHAR(50) UNIQUE NOT NULL,
-			email VARCHAR(100) UNIQUE NOT NULL,
-			password_hash VARCHAR(255) NOT NULL,
-			full_name VARCHAR(100) NOT NULL,
-			role_id UUID NOT NULL REFERENCES roles(id),
-			is_active BOOLEAN DEFAULT true,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		);`,
+// 		// 5. Tabel users
+// 		`CREATE TABLE IF NOT EXISTS users (
+// 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+// 			username VARCHAR(50) UNIQUE NOT NULL,
+// 			email VARCHAR(100) UNIQUE NOT NULL,
+// 			password_hash VARCHAR(255) NOT NULL,
+// 			full_name VARCHAR(100) NOT NULL,
+// 			role_id UUID NOT NULL REFERENCES roles(id),
+// 			is_active BOOLEAN DEFAULT true,
+// 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+// 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+// 		);`,
 
-		// 6. Tabel lecturers (Dibuat sebelum students karena direferensi oleh students)
-		`CREATE TABLE IF NOT EXISTS lecturers (
-			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-			user_id UUID NOT NULL UNIQUE REFERENCES users(id),
-			lecturer_id VARCHAR(20) UNIQUE NOT NULL, -- NIP
-			department VARCHAR(100),
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		);`,
+// 		// 6. Tabel lecturers (Dibuat sebelum students karena direferensi oleh students)
+// 		`CREATE TABLE IF NOT EXISTS lecturers (
+// 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+// 			user_id UUID NOT NULL UNIQUE REFERENCES users(id),
+// 			lecturer_id VARCHAR(20) UNIQUE NOT NULL, -- NIP
+// 			department VARCHAR(100),
+// 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+// 		);`,
 
-		// 7. Tabel students
-		`CREATE TABLE IF NOT EXISTS students (
-			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-			user_id UUID NOT NULL UNIQUE REFERENCES users(id),
-			student_id VARCHAR(20) UNIQUE NOT NULL, -- NIM
-			program_study VARCHAR(100),
-			academic_year VARCHAR(10),
-			advisor_id UUID REFERENCES lecturers(id),
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		);`,
+// 		// 7. Tabel students
+// 		`CREATE TABLE IF NOT EXISTS students (
+// 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+// 			user_id UUID NOT NULL UNIQUE REFERENCES users(id),
+// 			student_id VARCHAR(20) UNIQUE NOT NULL, -- NIM
+// 			program_study VARCHAR(100),
+// 			academic_year VARCHAR(10),
+// 			advisor_id UUID REFERENCES lecturers(id),
+// 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+// 		);`,
 
-		// 8. Tabel achievement_references
-		`CREATE TABLE IF NOT EXISTS achievement_references (
-			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-			student_id UUID NOT NULL REFERENCES students(id),
-			mongo_achievement_id VARCHAR(24) NOT NULL,
-			title VARCHAR(255) NOT NULL,
-			status VARCHAR(20) DEFAULT 'draft',
-			submitted_at TIMESTAMP,
-			verified_at TIMESTAMP,
-			verified_by UUID REFERENCES users(id),
-			rejection_note TEXT,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		);`,
-	}
+// 		// 8. Tabel achievement_references
+// 		`CREATE TABLE IF NOT EXISTS achievement_references (
+// 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+// 			student_id UUID NOT NULL REFERENCES students(id),
+// 			mongo_achievement_id VARCHAR(24) NOT NULL,
+// 			title VARCHAR(255) NOT NULL,
+// 			status VARCHAR(20) DEFAULT 'draft',
+// 			submitted_at TIMESTAMP,
+// 			verified_at TIMESTAMP,
+// 			verified_by UUID REFERENCES users(id),
+// 			rejection_note TEXT,
+// 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+// 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+// 		);`,
+// 	}
 
-	for _, query := range queries {
-		_, err := db.Exec(query)
-		if err != nil {
-			log.Printf("⚠️ Gagal menjalankan migrasi query: %s\nError: %v", query, err)
-			// Kita tidak panic disini agar jika tabel sudah ada, aplikasi tetap jalan (walau IF NOT EXISTS sudah menangani)
-		}
-	}
-	log.Println("✅ Manual Migration Selesai")
-}
+// 	for _, query := range queries {
+// 		_, err := db.Exec(query)
+// 		if err != nil {
+// 			log.Printf("⚠️ Gagal menjalankan migrasi query: %s\nError: %v", query, err)
+// 			// Kita tidak panic disini agar jika tabel sudah ada, aplikasi tetap jalan (walau IF NOT EXISTS sudah menangani)
+// 		}
+// 	}
+// 	log.Println("✅ Manual Migration Selesai")
+// }
