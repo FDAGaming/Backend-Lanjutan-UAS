@@ -34,7 +34,6 @@ func SeedDummyData(pg *sql.DB, mongoDB *mongo.Database) {
 		// Cek apakah role sudah ada
 		err := pg.QueryRow("SELECT id FROM roles WHERE name = $1", name).Scan(&id)
 		if err == sql.ErrNoRows {
-			// Jika belum ada, Insert
 			err = pg.QueryRow(
 				"INSERT INTO roles (name, description) VALUES ($1, $2) RETURNING id",
 				name, desc,
@@ -47,12 +46,75 @@ func SeedDummyData(pg *sql.DB, mongoDB *mongo.Database) {
 		roleIDs[name] = id
 	}
 
+	// 1.5 SEED PERMISSIONS & ROLE ASSIGNMENT (BARU DITAMBAHKAN)
+	// ==========================================
+	
+	// Definisi Permission yang dibutuhkan sistem
+	permissions := []struct {
+		Name     string
+		Resource string
+		Action   string
+	}{
+		{"user:manage", "user", "manage"},             // Untuk Admin
+		{"achievement:create", "achievement", "create"}, // Untuk Mahasiswa
+		{"achievement:update", "achievement", "update"}, // Untuk Mahasiswa
+		{"achievement:delete", "achievement", "delete"}, // Untuk Mahasiswa
+		{"achievement:verify", "achievement", "verify"}, // Untuk Dosen Wali
+		{"achievement:read", "achievement", "read"},     // Umum
+	}
+
+	permIDs := make(map[string]string)
+
+	// Insert Permissions
+	for _, p := range permissions {
+		var id string
+		err := pg.QueryRow("SELECT id FROM permissions WHERE name = $1", p.Name).Scan(&id)
+		if err == sql.ErrNoRows {
+			err = pg.QueryRow(
+				"INSERT INTO permissions (name, resource, action, description) VALUES ($1, $2, $3, '') RETURNING id",
+				p.Name, p.Resource, p.Action,
+			).Scan(&id)
+			if err != nil {
+				log.Fatalf("❌ Gagal seed permission %s: %v", p.Name, err)
+			}
+			log.Printf("✅ Permission Created: %s", p.Name)
+		}
+		permIDs[p.Name] = id
+	}
+
+	// Mapping Role ke Permission
+	rolePermMap := map[string][]string{
+		"Admin":      {"user:manage", "achievement:read"},
+		"Mahasiswa":  {"achievement:create", "achievement:update", "achievement:delete", "achievement:read"},
+		"Dosen Wali": {"achievement:verify", "achievement:read"},
+	}
+
+	// Insert ke role_permissions
+	for roleName, perms := range rolePermMap {
+		roleID := roleIDs[roleName]
+		for _, permName := range perms {
+			permID := permIDs[permName]
+			
+			// Insert ignore conflict (simple check)
+			var exists int
+			pg.QueryRow("SELECT 1 FROM role_permissions WHERE role_id=$1 AND permission_id=$2", roleID, permID).Scan(&exists)
+			
+			if exists == 0 {
+				_, err := pg.Exec("INSERT INTO role_permissions (role_id, permission_id) VALUES ($1, $2)", roleID, permID)
+				if err != nil {
+					log.Printf("⚠️ Gagal assign permission %s ke role %s: %v", permName, roleName, err)
+				}
+			}
+		}
+		log.Printf("🔗 Permissions assigned to Role: %s", roleName)
+	}
+
+
 	// 2. SEED USERS (Admin, Dosen, Mahasiswa)
 	// ==========================================
 	passwordHash, _ := hashPassword("123456") // Password default
 
 	// -- User Admin --
-	// PERBAIKAN: Gunakan '_' karena kita tidak butuh ID admin untuk proses selanjutnya
 	_ = seedUser(pg, "admin", "admin@univ.ac.id", passwordHash, "Super Admin", roleIDs["Admin"])
 	
 	// -- User Dosen --

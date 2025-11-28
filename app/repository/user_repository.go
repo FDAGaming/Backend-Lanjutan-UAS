@@ -104,6 +104,43 @@ func (r *UserRepository) FindByID(id string) (*model.User, error) {
 	return &user, nil
 }
 
+// FindAll mengambil semua user (Admin Feature)
+func (r *UserRepository) FindAll() ([]model.User, error) {
+	query := `
+		SELECT 
+			u.id, u.username, u.email, u.password_hash, u.full_name, u.role_id, u.is_active, u.created_at, u.updated_at,
+			r.id, r.name, r.description
+		FROM users u
+		JOIN roles r ON u.role_id = r.id
+		ORDER BY u.created_at DESC`
+
+	rows, err := r.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []model.User
+	for rows.Next() {
+		var user model.User
+		user.Role = &model.Role{} // Init pointer role
+
+		err := rows.Scan(
+			&user.ID, &user.Username, &user.Email, &user.PasswordHash, &user.FullName, &user.RoleID, &user.IsActive, &user.CreatedAt, &user.UpdatedAt,
+			&user.Role.ID, &user.Role.Name, &user.Role.Description,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		// Security: Kosongkan password hash sebelum dikirim ke client
+		user.PasswordHash = ""
+		users = append(users, user)
+	}
+
+	return users, nil
+}
+
 // --- Helper untuk Profil ---
 
 // Cari Data Mahasiswa berdasarkan UserID (Untuk validasi saat submit prestasi)
