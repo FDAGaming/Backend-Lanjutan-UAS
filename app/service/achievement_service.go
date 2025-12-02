@@ -218,24 +218,45 @@ func (s *AchievementService) Reject(c *fiber.Ctx) error {
 // DELETE /api/v1/achievements/:id
 func (s *AchievementService) Delete(c *fiber.Ctx) error {
 	id := c.Params("id")
-	userID := c.Locals("user_id").(string)
-	student, _ := s.userRepo.FindStudentByUserID(userID)
 	
-	// Cek kepemilikan sebelum hapus
+	// 1. Ambil User ID dari Token (Mahasiswa yang sedang login)
+	userID := c.Locals("user_id").(string)
+	
+	// 2. Cari Profil Mahasiswa berdasarkan User ID
+	student, err := s.userRepo.FindStudentByUserID(userID)
+	if err != nil {
+		// Jika profil mahasiswa tidak ditemukan (misal login sebagai Dosen tapi coba hapus punya mhs)
+		return c.Status(403).JSON(model.WebResponse{Code: 403, Status: "error", Message: "Unauthorized: Student profile not found"})
+	}
+	
+	// 3. Cari Data Prestasi untuk Validasi
 	ref, _, err := s.achRepo.FindDetail(c.Context(), id)
 	if err != nil {
-		return c.Status(404).JSON(model.WebResponse{Code: 404, Status: "error", Message: "Not found"})
+		return c.Status(404).JSON(model.WebResponse{Code: 404, Status: "error", Message: "Achievement not found"})
 	}
 	
-	if student != nil && ref.StudentID != student.ID {
-		return c.Status(403).JSON(model.WebResponse{Code: 403, Status: "error", Message: "Forbidden"})
+	// 4. Validasi Kepemilikan (Ownership Check)
+	// Pastikan StudentID di prestasi SAMA dengan StudentID user yang login
+	if ref.StudentID != student.ID {
+		return c.Status(403).JSON(model.WebResponse{Code: 403, Status: "error", Message: "Forbidden: You do not own this achievement"})
 	}
 
+	// 5. Validasi Status di Service (Optional, karena Repo juga sudah cek)
+	// Tapi baiknya dicek di sini untuk return pesan error yang lebih spesifik
+	if ref.Status != "draft" {
+		return c.Status(400).JSON(model.WebResponse{Code: 400, Status: "error", Message: "Cannot delete achievement. Only 'draft' status can be deleted."})
+	}
+
+	// 6. Panggil Repo untuk Hapus (Postgres + Mongo)
 	if err := s.achRepo.Delete(c.Context(), id); err != nil {
-		return c.Status(400).JSON(model.WebResponse{Code: 400, Status: "error", Message: err.Error()})
+		return c.Status(500).JSON(model.WebResponse{Code: 500, Status: "error", Message: "Failed to delete: " + err.Error()})
 	}
 
-	return c.JSON(model.WebResponse{Code: 200, Status: "success", Message: "Prestasi berhasil dihapus"})
+	return c.JSON(model.WebResponse{
+		Code:    200,
+		Status:  "success",
+		Message: "Prestasi draft berhasil dihapus",
+	})
 }
 
 // ... (Method stub/placeholder lain seperti Update, GetHistory, UploadAttachment biarkan saja seperti sebelumnya) ...
@@ -252,8 +273,31 @@ func (s *AchievementService) UploadAttachment(c *fiber.Ctx) error {
 	return c.Status(501).JSON(model.WebResponse{Code: 501, Status: "error", Message: "Upload Not Implemented"})
 }
 
+// GET /api/v1/lecturers/:id/advisees
+// FR-006: View Prestasi Mahasiswa Bimbingan
 func (s *AchievementService) GetAdviseeAchievements(c *fiber.Ctx) error {
-	return c.Status(501).JSON(model.WebResponse{Code: 501, Status: "error", Message: "Advisee List Not Implemented"})
+	// 1. Ambil User ID Dosen dari Token
+	userID := c.Locals("user_id").(string)
+
+	// 2. Cari Profil Dosen (Lecturer) berdasarkan User ID
+	lecturer, err := s.userRepo.FindLecturerByUserID(userID)
+	if err != nil {
+		return c.Status(404).JSON(model.WebResponse{Code: 404, Status: "error", Message: "Lecturer profile not found"})
+	}
+
+	// 3. Parse Parameter Pagination (Page, Limit, Search, Sort)
+	param := s.parsePagination(c)
+
+	// 4. Panggil Repo FindAll dengan Filter AdvisorID
+	// Parameter ke-2 (studentID) kosong karena kita mau semua mahasiswa bimbingan, bukan spesifik satu
+	// Parameter ke-3 (advisorID) diisi ID Dosen yang sedang login
+	data, total, err := s.achRepo.FindAll(param, "", lecturer.ID)
+	if err != nil {
+		return c.Status(500).JSON(model.WebResponse{Code: 500, Status: "error", Message: err.Error()})
+	}
+
+	// 5. Return Response dengan Pagination
+	return s.sendPaginationResponse(c, data, total, param)
 }
 
 func (s *AchievementService) GetStudentAchievements(c *fiber.Ctx) error {
