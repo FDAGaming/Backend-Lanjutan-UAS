@@ -22,31 +22,29 @@ type AchievementRepository struct {
 func NewAchievementRepository(pg *sql.DB, mongoDB *mongo.Database) *AchievementRepository {
 	return &AchievementRepository{
 		pgDB:      pg,
-		mongoColl: mongoDB.Collection("achievements"), // Sesuai SRS 3.2.1
+		mongoColl: mongoDB.Collection("achievements"),
 	}
 }
 
 // --- CREATE (HYBRID TRANSACTION) ---
-
 func (r *AchievementRepository) Create(ctx context.Context, content *model.Achievement, ref *model.AchievementReference) error {
-	// 1. Set Timestamp
 	now := time.Now()
 	content.CreatedAt = now
 	content.UpdatedAt = now
 	ref.CreatedAt = now
 	ref.UpdatedAt = now
 
-	// 2. Insert ke MongoDB
+	// 1. Insert ke MongoDB
 	res, err := r.mongoColl.InsertOne(ctx, content)
 	if err != nil {
 		return err
 	}
 
-	// 3. Ambil ID dari Mongo, masukkan ke field Reference Postgres
+	// Ambil ID dari Mongo
 	oid, _ := res.InsertedID.(primitive.ObjectID)
 	ref.MongoAchievementID = oid.Hex()
 
-	// 4. Insert ke PostgreSQL
+	// 2. Insert ke PostgreSQL
 	query := `
 		INSERT INTO achievement_references (
 			student_id, mongo_achievement_id, title, status, created_at, updated_at
@@ -73,24 +71,21 @@ func (r *AchievementRepository) Create(ctx context.Context, content *model.Achie
 	return nil
 }
 
-// --- FIND ALL (PAGINATION, SORT, SEARCH - MODUL 6) ---
-
+// --- FIND ALL (PAGINATION, SORT, SEARCH) ---
 func (r *AchievementRepository) FindAll(param model.PaginationParam, studentID string, advisorID string) ([]model.AchievementReference, int64, error) {
 	var achievements []model.AchievementReference
 	var total int64
 
 	// Base Query
-	// Kita join ke Student & User untuk mendapatkan info dasar (misal nama mahasiswa)
 	baseQuery := `
 		SELECT 
 			ar.id, ar.student_id, ar.mongo_achievement_id, ar.title, ar.status, 
 			ar.submitted_at, ar.verified_at, ar.verified_by, ar.rejection_note, ar.created_at, ar.updated_at,
-			u.full_name, s.student_id -- Info tambahan untuk frontend (Nama & NIM)
+			u.full_name, s.student_id
 		FROM achievement_references ar
 		JOIN students s ON ar.student_id = s.id
 		JOIN users u ON s.user_id = u.id`
 
-	// Dynamic Filtering
 	var conditions []string
 	var args []interface{}
 	argId := 1
@@ -114,16 +109,9 @@ func (r *AchievementRepository) FindAll(param model.PaginationParam, studentID s
 		searchLike := "%" + strings.ToLower(param.Search) + "%"
 		conditions = append(conditions, fmt.Sprintf("(LOWER(ar.title) LIKE $%d OR LOWER(ar.status) LIKE $%d)", argId, argId))
 		args = append(args, searchLike)
-		// Karena kita pakai placeholder yang sama ($N) dua kali di query string, lib/pq mungkin butuh trik,
-		// tapi standar sql driver biasanya mapping by index.
-		// Untuk aman di PostgreSQL native driver ($1, $2), kita perlu append argumen yang sama jika indexnya beda.
-		// Namun di sini kita pakai trik index yang sama ($3... $3) jika driver mendukung, 
-		// atau kita anggap argumennya cuma satu searchLike.
-		// Koreksi: Untuk Postgres ($1, $2), kita tidak bisa reuse index untuk value berbeda.
-		// Tapi karena valuenya SAMA, kita reuse indexnya.
+		argId++ // Increment argId for the next potential argument
 	}
 
-	// Construct WHERE clause
 	whereClause := ""
 	if len(conditions) > 0 {
 		whereClause = " WHERE " + strings.Join(conditions, " AND ")
@@ -136,6 +124,15 @@ func (r *AchievementRepository) FindAll(param model.PaginationParam, studentID s
 		JOIN students s ON ar.student_id = s.id 
 	` + whereClause
 
+	// Note: We need to pass 'args' carefully. If search was used, args has the search term twice? 
+	// No, in my implementation above I used the SAME arg index ($N) for both title and status check.
+	// But 'args' slice only needs the value ONCE if I use the same index.
+	// Wait, standard sql package placeholder $1, $2.. implies distinct arguments usually.
+	// Actually, for Postgres $1 can be reused. So if I used the same index in the format string, I only append once.
+	// Correct logic:
+	// conditions: ... LIKE $3 OR ... LIKE $3
+	// args: [..., searchTerm] -> correct.
+
 	if err := r.pgDB.QueryRow(countQuery, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
@@ -143,7 +140,6 @@ func (r *AchievementRepository) FindAll(param model.PaginationParam, studentID s
 	// 2. Sorting
 	orderBy := "ar.created_at" // Default
 	if param.SortBy != "" {
-		// Whitelist column names to prevent SQL Injection
 		validSorts := map[string]string{
 			"title":      "ar.title",
 			"status":     "ar.status",
@@ -177,9 +173,8 @@ func (r *AchievementRepository) FindAll(param model.PaginationParam, studentID s
 
 	for rows.Next() {
 		var ar model.AchievementReference
-		ar.Student = &model.Student{User: &model.User{}} // Init nested struct
+		ar.Student = &model.Student{User: &model.User{}} 
 
-		// Variable helper untuk scanning field nullable
 		var subAt, verAt sql.NullTime
 		var verBy sql.NullString
 		var rejNote sql.NullString
@@ -187,22 +182,17 @@ func (r *AchievementRepository) FindAll(param model.PaginationParam, studentID s
 		err := rows.Scan(
 			&ar.ID, &ar.StudentID, &ar.MongoAchievementID, &ar.Title, &ar.Status,
 			&subAt, &verAt, &verBy, &rejNote, &ar.CreatedAt, &ar.UpdatedAt,
-			&ar.Student.User.FullName, &ar.Student.StudentID, // Nama & NIM
+			&ar.Student.User.FullName, &ar.Student.StudentID, 
 		)
 		if err != nil {
 			return nil, 0, err
 		}
 
-		// Map Nullable Fields
-		if subAt.Valid {
-			ar.SubmittedAt = &subAt.Time
-		}
-		if verAt.Valid {
-			ar.VerifiedAt = &verAt.Time
-		}
-		if verBy.Valid {
+		if subAt.Valid { ar.SubmittedAt = &subAt.Time }
+		if verAt.Valid { ar.VerifiedAt = &verAt.Time }
+		if verBy.Valid { 
 			str := verBy.String
-			ar.VerifiedBy = &str
+			ar.VerifiedBy = &str 
 		}
 		ar.RejectionNote = rejNote.String
 
@@ -213,15 +203,14 @@ func (r *AchievementRepository) FindAll(param model.PaginationParam, studentID s
 }
 
 // --- FIND DETAIL (HYBRID FETCH) ---
-
 func (r *AchievementRepository) FindDetail(ctx context.Context, id string) (*model.AchievementReference, *model.Achievement, error) {
 	// 1. Ambil data Metadata dari Postgres
 	query := `
 		SELECT 
 			ar.id, ar.student_id, ar.mongo_achievement_id, ar.title, ar.status, 
 			ar.submitted_at, ar.verified_at, ar.verified_by, ar.rejection_note, ar.created_at, ar.updated_at,
-			s.student_id, u.full_name, -- Info Student
-			ver_u.full_name -- Info Verifier
+			s.student_id, u.full_name,
+			ver_u.full_name
 		FROM achievement_references ar
 		JOIN students s ON ar.student_id = s.id
 		JOIN users u ON s.user_id = u.id
@@ -251,13 +240,8 @@ func (r *AchievementRepository) FindDetail(ctx context.Context, id string) (*mod
 		return nil, nil, err
 	}
 
-	// Map Nullable
-	if subAt.Valid {
-		ref.SubmittedAt = &subAt.Time
-	}
-	if verAt.Valid {
-		ref.VerifiedAt = &verAt.Time
-	}
+	if subAt.Valid { ref.SubmittedAt = &subAt.Time }
+	if verAt.Valid { ref.VerifiedAt = &verAt.Time }
 	if verBy.Valid {
 		str := verBy.String
 		ref.VerifiedBy = &str
@@ -274,46 +258,56 @@ func (r *AchievementRepository) FindDetail(ctx context.Context, id string) (*mod
 
 	err = r.mongoColl.FindOne(ctx, bson.M{"_id": objID}).Decode(&content)
 	if err != nil {
-		// Jika data mongo hilang (inkonsistensi), return meta saja dengan error note
 		return &ref, nil, errors.New("detail data not found in mongo")
 	}
 
 	return &ref, &content, nil
 }
 
-// --- UPDATE STATUS (VERIFIKASI DOSEN) ---
-
+// --- UPDATE STATUS (VERIFIKASI DOSEN & UPDATE POIN) ---
 func (r *AchievementRepository) UpdateStatus(id string, status string, verifiedBy string, note string, points int) error {
-	// Build Query
+	// 1. Update di PostgreSQL (Status, VerifiedBy, RejectionNote)
 	query := `
 		UPDATE achievement_references 
 		SET status = $1, updated_at = $2, verified_by = $3, verified_at = $4, rejection_note = $5
-		WHERE id = $6`
+		WHERE id = $6
+		RETURNING mongo_achievement_id`
 	
 	now := time.Now()
 	
-	// Handle nullable verifiedBy
 	var verBy interface{} = nil
 	if verifiedBy != "" {
 		verBy = verifiedBy
 	}
 
-	// Note: Field 'points' tidak ada di Struct AchievementReference Postgres dalam kode model terakhir kita,
-	// Jika SRS meminta simpan poin di SQL, pastikan kolom 'points' ada di tabel achievement_references.
-	// Jika belum ada, query ini mungkin error. Asumsi kolom sudah dibuat di migration manual config/database.go
-	// Jika kolom points belum ada, hapus baris update points. 
-	// (Berdasarkan model AchievementReference di chat sebelumnya, field Points belum ditambahkan ke Struct SQL, hanya di Mongo).
-	// Namun, jika mau update points, idealnya update juga di Mongo.
-	
-	// Kita update SQL standard dulu
-	_, err := r.pgDB.Exec(query, status, now, verBy, now, note, id)
-	return err
+	var mongoID string
+	// QueryRow digunakan karena kita mengharapkan RETURNING mongo_achievement_id
+	err := r.pgDB.QueryRow(query, status, now, verBy, now, note, id).Scan(&mongoID)
+	if err != nil {
+		return err
+	}
+
+	// 2. Update di MongoDB (Hanya jika Verified, kita simpan Poinnya)
+	if status == "verified" && mongoID != "" {
+		objID, err := primitive.ObjectIDFromHex(mongoID)
+		if err == nil {
+			// Update field "points" di dokumen MongoDB
+			_, err = r.mongoColl.UpdateOne(
+				context.Background(), 
+				bson.M{"_id": objID}, 
+				bson.M{"$set": bson.M{"points": points}},
+			)
+			if err != nil {
+				return errors.New("failed to update points in mongo: " + err.Error())
+			}
+		}
+	}
+
+	return nil
 }
 
-// --- DELETE (SOFT DELETE / HARD DELETE) ---
-// Sesuai FR-005, mahasiswa bisa hapus draft
+// --- DELETE ---
 func (r *AchievementRepository) Delete(ctx context.Context, id string) error {
-	// 1. Cari dulu datanya untuk dapatkan MongoID & Cek Status
 	var mongoID string
 	var status string
 	
@@ -322,18 +316,15 @@ func (r *AchievementRepository) Delete(ctx context.Context, id string) error {
 		return err
 	}
 
-	// Cek status: Hanya boleh hapus jika Draft
 	if status != "draft" {
 		return errors.New("cannot delete submitted or verified achievement")
 	}
 
-	// 2. Hapus dari Postgres
 	_, err = r.pgDB.Exec("DELETE FROM achievement_references WHERE id = $1", id)
 	if err != nil {
 		return err
 	}
 
-	// 3. Hapus dari Mongo (Cleanup)
 	if mongoID != "" {
 		objID, _ := primitive.ObjectIDFromHex(mongoID)
 		_, err := r.mongoColl.DeleteOne(ctx, bson.M{"_id": objID})
