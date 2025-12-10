@@ -231,3 +231,124 @@ func (r *UserRepository) FindLecturerByUserID(userID string) (*model.Lecturer, e
 
 	return &l, nil
 }
+
+// UPDATE USER (General Info)
+func (r *UserRepository) Update(user *model.User) error {
+	query := `
+		UPDATE users 
+		SET full_name = $1, username = $2, email = $3, is_active = $4, updated_at = $5
+		WHERE id = $6`
+	
+	_, err := r.db.Exec(query, user.FullName, user.Username, user.Email, user.IsActive, time.Now(), user.ID)
+	return err
+}
+
+// DELETE USER
+func (r *UserRepository) Delete(id string) error {
+	// Karena ada Foreign Key Cascade (biasanya), menghapus user akan menghapus profile student/lecturer juga
+	// Jika tidak cascade, harus hapus child dulu. Asumsi di migrasi manual kita pakai REFERENCES ... (default no cascade action usually restrictive)
+	// Mari kita hapus manual untuk aman
+	
+	// 1. Hapus Profile Student jika ada
+	_, _ = r.db.Exec("DELETE FROM students WHERE user_id = $1", id)
+	// 2. Hapus Profile Lecturer jika ada
+	_, _ = r.db.Exec("DELETE FROM lecturers WHERE user_id = $1", id)
+	
+	// 3. Hapus User
+	_, err := r.db.Exec("DELETE FROM users WHERE id = $1", id)
+	return err
+}
+
+// ASSIGN ROLE (Update Role ID)
+func (r *UserRepository) UpdateRole(userID, roleID string) error {
+	_, err := r.db.Exec("UPDATE users SET role_id = $1, updated_at = $2 WHERE id = $3", roleID, time.Now(), userID)
+	return err
+}
+
+// --- AKADEMIK PROFIL (Student & Lecturer) ---
+
+// UPSERT STUDENT PROFILE
+// Membuat atau Mengupdate data profil mahasiswa
+func (r *UserRepository) SaveStudent(s *model.Student) error {
+	// Cek apakah profile sudah ada
+	var exists bool
+	r.db.QueryRow("SELECT EXISTS(SELECT 1 FROM students WHERE user_id = $1)", s.UserID).Scan(&exists)
+
+	if exists {
+		// Update
+		query := `UPDATE students SET student_id = $1, program_study = $2, academic_year = $3 WHERE user_id = $4`
+		_, err := r.db.Exec(query, s.StudentID, s.ProgramStudy, s.AcademicYear, s.UserID)
+		return err
+	} else {
+		// Insert
+		query := `INSERT INTO students (user_id, student_id, program_study, academic_year) VALUES ($1, $2, $3, $4)`
+		_, err := r.db.Exec(query, s.UserID, s.StudentID, s.ProgramStudy, s.AcademicYear)
+		return err
+	}
+}
+
+// UPSERT LECTURER PROFILE
+func (r *UserRepository) SaveLecturer(l *model.Lecturer) error {
+	var exists bool
+	r.db.QueryRow("SELECT EXISTS(SELECT 1 FROM lecturers WHERE user_id = $1)", l.UserID).Scan(&exists)
+
+	if exists {
+		query := `UPDATE lecturers SET lecturer_id = $1, department = $2 WHERE user_id = $3`
+		_, err := r.db.Exec(query, l.LecturerID, l.Department, l.UserID)
+		return err
+	} else {
+		query := `INSERT INTO lecturers (user_id, lecturer_id, department) VALUES ($1, $2, $3)`
+		_, err := r.db.Exec(query, l.UserID, l.LecturerID, l.Department)
+		return err
+	}
+}
+
+// ASSIGN ADVISOR (Set Dosen Wali untuk Mahasiswa)
+func (r *UserRepository) AssignAdvisor(studentID string, advisorID string) error {
+	// studentID disini adalah UUID primary key tabel students (bukan user_id)
+	query := `UPDATE students SET advisor_id = $1 WHERE id = $2`
+	_, err := r.db.Exec(query, advisorID, studentID)
+	return err
+}
+
+// FindAllStudents mengambil list mahasiswa untuk admin
+func (r *UserRepository) FindAllStudents() ([]model.Student, error) {
+	query := `
+		SELECT s.id, s.student_id, s.program_study, s.academic_year, u.full_name 
+		FROM students s
+		JOIN users u ON s.user_id = u.id`
+	
+	rows, err := r.db.Query(query)
+	if err != nil { return nil, err }
+	defer rows.Close()
+
+	var students []model.Student
+	for rows.Next() {
+		var s model.Student
+		s.User = &model.User{}
+		rows.Scan(&s.ID, &s.StudentID, &s.ProgramStudy, &s.AcademicYear, &s.User.FullName)
+		students = append(students, s)
+	}
+	return students, nil
+}
+
+// FindAllLecturers mengambil list dosen
+func (r *UserRepository) FindAllLecturers() ([]model.Lecturer, error) {
+	query := `
+		SELECT l.id, l.lecturer_id, l.department, u.full_name 
+		FROM lecturers l
+		JOIN users u ON l.user_id = u.id`
+	
+	rows, err := r.db.Query(query)
+	if err != nil { return nil, err }
+	defer rows.Close()
+
+	var lecturers []model.Lecturer
+	for rows.Next() {
+		var l model.Lecturer
+		l.User = &model.User{}
+		rows.Scan(&l.ID, &l.LecturerID, &l.Department, &l.User.FullName)
+		lecturers = append(lecturers, l)
+	}
+	return lecturers, nil
+}
