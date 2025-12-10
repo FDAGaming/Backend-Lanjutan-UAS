@@ -75,30 +75,34 @@ func (s *AchievementService) Submit(c *fiber.Ctx) error {
 
 // GET /api/v1/achievements
 func (s *AchievementService) GetAll(c *fiber.Ctx) error {
-	param := s.parsePagination(c)
-	userRole := c.Locals("role").(string)
-	userID := c.Locals("user_id").(string)
+    param := s.parsePagination(c)
+    userRole := c.Locals("role").(string) // Ambil Role dari Token
+    userID := c.Locals("user_id").(string)
 
-	var filterStudent, filterAdvisor string
+    var filterStudent, filterAdvisor string
 
-	if userRole == "Mahasiswa" {
-		student, _ := s.userRepo.FindStudentByUserID(userID)
-		if student != nil {
-			filterStudent = student.ID
-		}
-	} else if userRole == "Dosen Wali" {
-		lecturer, _ := s.userRepo.FindLecturerByUserID(userID)
-		if lecturer != nil {
-			filterAdvisor = lecturer.ID
-		}
-	}
+    // Logic Filter Berdasarkan Role (RBAC Data Level)
+    if userRole == "Mahasiswa" {
+        student, _ := s.userRepo.FindStudentByUserID(userID)
+        if student != nil {
+            filterStudent = student.ID
+        }
+    } else if userRole == "Dosen Wali" {
+        lecturer, _ := s.userRepo.FindLecturerByUserID(userID)
+        if lecturer != nil {
+            filterAdvisor = lecturer.ID
+        }
+    }
+    // JIKA ADMIN: Kode akan melewati if/else di atas,
+    // sehingga filterStudent & filterAdvisor tetap string kosong ("").
+    // Akibatnya, Repository akan mengambil SEMUA data tanpa filter WHERE.
 
-	data, total, err := s.achRepo.FindAll(param, filterStudent, filterAdvisor)
-	if err != nil {
-		return c.Status(500).JSON(model.WebResponse{Code: 500, Status: "error", Message: err.Error()})
-	}
+    data, total, err := s.achRepo.FindAll(param, filterStudent, filterAdvisor)
+    if err != nil {
+        return c.Status(500).JSON(model.WebResponse{Code: 500, Status: "error", Message: err.Error()})
+    }
 
-	return s.sendPaginationResponse(c, data, total, param)
+    return s.sendPaginationResponse(c, data, total, param)
 }
 
 // GET /api/v1/achievements/:id
