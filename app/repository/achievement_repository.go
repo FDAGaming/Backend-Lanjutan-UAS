@@ -124,15 +124,6 @@ func (r *AchievementRepository) FindAll(param model.PaginationParam, studentID s
 		JOIN students s ON ar.student_id = s.id 
 	` + whereClause
 
-	// Note: We need to pass 'args' carefully. If search was used, args has the search term twice? 
-	// No, in my implementation above I used the SAME arg index ($N) for both title and status check.
-	// But 'args' slice only needs the value ONCE if I use the same index.
-	// Wait, standard sql package placeholder $1, $2.. implies distinct arguments usually.
-	// Actually, for Postgres $1 can be reused. So if I used the same index in the format string, I only append once.
-	// Correct logic:
-	// conditions: ... LIKE $3 OR ... LIKE $3
-	// args: [..., searchTerm] -> correct.
-
 	if err := r.pgDB.QueryRow(countQuery, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
@@ -281,7 +272,6 @@ func (r *AchievementRepository) UpdateStatus(id string, status string, verifiedB
 	}
 
 	var mongoID string
-	// QueryRow digunakan karena kita mengharapkan RETURNING mongo_achievement_id
 	err := r.pgDB.QueryRow(query, status, now, verBy, now, note, id).Scan(&mongoID)
 	if err != nil {
 		return err
@@ -332,4 +322,150 @@ func (r *AchievementRepository) Delete(ctx context.Context, id string) error {
 	}
 	
 	return nil
+}
+
+// --- STATISTICS (FR-011) ---
+
+type StatsResult struct {
+	TotalPerType      map[string]int `json:"totalPerType"`
+	TotalPerLevel     map[string]int `json:"totalPerLevel"`
+	TopStudents       []TopStudent   `json:"topStudents"`
+}
+
+type TopStudent struct {
+	Name        string `json:"name"`
+	Program     string `json:"programStudy"`
+	TotalPoints int    `json:"totalPoints"`
+}
+
+// GetStatistics generates overall stats
+func (r *AchievementRepository) GetStatistics(ctx context.Context) (*StatsResult, error) {
+	result := &StatsResult{
+		TotalPerType:  make(map[string]int),
+		TotalPerLevel: make(map[string]int),
+		TopStudents:   []TopStudent{},
+	}
+
+	// 1. Total Per Type (Aggregation MongoDB)
+	pipeline := mongo.Pipeline{
+		{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: "$achievementType"},
+			{Key: "count", Value: bson.D{{Key: "$sum", Value: 1}}},
+		}}},
+	}
+	cursor, err := r.mongoColl.Aggregate(ctx, pipeline)
+	if err == nil {
+		var typeStats []struct {
+			ID    string `bson:"_id"`
+			Count int    `bson:"count"`
+		}
+		if err = cursor.All(ctx, &typeStats); err == nil {
+			for _, s := range typeStats {
+				result.TotalPerType[s.ID] = s.Count
+			}
+		}
+	}
+
+	// 2. Total Per Level (Aggregation MongoDB)
+	pipelineLevel := mongo.Pipeline{
+		{{Key: "$match", Value: bson.D{{Key: "achievementType", Value: "competition"}}}},
+		{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: "$details.competitionLevel"},
+			{Key: "count", Value: bson.D{{Key: "$sum", Value: 1}}},
+		}}},
+	}
+	cursorLevel, err := r.mongoColl.Aggregate(ctx, pipelineLevel)
+	if err == nil {
+		var levelStats []struct {
+			ID    string `bson:"_id"`
+			Count int    `bson:"count"`
+		}
+		if err = cursorLevel.All(ctx, &levelStats); err == nil {
+			for _, s := range levelStats {
+				key := s.ID
+				if key == "" { key = "unknown" }
+				result.TotalPerLevel[key] = s.Count
+			}
+		}
+	}
+
+	// 3. Top Students (Points from Mongo, Name from Postgres)
+	// We aggregate studentID and their total points from Mongo first
+	pipelineTop := mongo.Pipeline{
+		// Only fetch achievements that have points (assuming > 0)
+		{{Key: "$match", Value: bson.D{{Key: "points", Value: bson.D{{Key: "$gt", Value: 0}}}}}},
+		{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: "$studentId"}, // Group by StudentID (UUID String)
+			{Key: "totalPoints", Value: bson.D{{Key: "$sum", Value: "$points"}}},
+		}}},
+		{{Key: "$sort", Value: bson.D{{Key: "totalPoints", Value: -1}}}}, // Sort Descending
+		{{Key: "$limit", Value: 5}}, // Top 5
+	}
+
+	cursorTop, err := r.mongoColl.Aggregate(ctx, pipelineTop)
+	if err == nil {
+		var topList []struct {
+			StudentID   string `bson:"_id"`
+			TotalPoints int    `bson:"totalPoints"`
+		}
+		
+		if err = cursorTop.All(ctx, &topList); err == nil {
+			// Loop aggregation results and get student name from Postgres
+			for _, t := range topList {
+				var name, program string
+				
+				// Query to students & users table
+				// Ensure studentID is valid in Postgres
+				queryUser := `
+					SELECT u.full_name, s.program_study 
+					FROM students s 
+					JOIN users u ON s.user_id = u.id 
+					WHERE s.id = $1`
+				
+				err := r.pgDB.QueryRow(queryUser, t.StudentID).Scan(&name, &program)
+				if err != nil {
+					// If user not found in Postgres (e.g. zombie data in Mongo), skip or set "Unknown"
+					// fmt.Printf("Warning: Student ID %s not found in Postgres\n", t.StudentID)
+					continue 
+				}
+
+				result.TopStudents = append(result.TopStudents, TopStudent{
+					Name:        name,
+					Program:     program,
+					TotalPoints: t.TotalPoints,
+				})
+			}
+		}
+	}
+
+	return result, nil
+}
+
+// GetStudentStatistics (Personal Stats)
+func (r *AchievementRepository) GetStudentStatistics(ctx context.Context, studentID string) (*StatsResult, error) {
+	result := &StatsResult{
+		TotalPerType: make(map[string]int),
+	}
+
+	pipeline := mongo.Pipeline{
+		{{Key: "$match", Value: bson.D{{Key: "studentId", Value: studentID}}}},
+		{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: "$achievementType"},
+			{Key: "count", Value: bson.D{{Key: "$sum", Value: 1}}},
+		}}},
+	}
+
+	cursor, err := r.mongoColl.Aggregate(ctx, pipeline)
+	if err == nil {
+		var stats []struct {
+			ID    string `bson:"_id"`
+			Count int    `bson:"count"`
+		}
+		cursor.All(ctx, &stats)
+		for _, s := range stats {
+			result.TotalPerType[s.ID] = s.Count
+		}
+	}
+
+	return result, nil
 }

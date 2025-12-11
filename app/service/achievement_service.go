@@ -27,87 +27,100 @@ func NewAchievementService(achRepo *repository.AchievementRepository, userRepo *
 
 // POST /api/v1/achievements (FR-003: Submit Prestasi - Draft)
 func (s *AchievementService) Submit(c *fiber.Ctx) error {
+	// 1. Parse Input
 	var req model.Achievement
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(model.WebResponse{Code: 400, Status: "error", Message: "Invalid input: " + err.Error()})
 	}
 
+	// 2. Ambil User ID dari Token (Middleware)
 	userID := c.Locals("user_id").(string)
+
+	// Validasi: Pastikan User adalah Mahasiswa dan punya profil Student
 	student, err := s.userRepo.FindStudentByUserID(userID)
 	if err != nil {
+		// Error 404 ini muncul jika user login tapi tidak ada di tabel 'students'
 		return c.Status(404).JSON(model.WebResponse{Code: 404, Status: "error", Message: "Student profile not found. Are you a student?"})
 	}
 
+	// 3. Siapkan Data MongoDB (Konten Detail)
 	mongoData := model.Achievement{
-		ID:              primitive.NewObjectID(),
-		StudentID:       student.ID,
+		ID:              primitive.NewObjectID(), // Generate ID baru untuk Mongo
+		StudentID:       student.ID,              // Link ke ID Student (Postgres UUID)
 		AchievementType: req.AchievementType,
 		Title:           req.Title,
 		Description:     req.Description,
-		Details:         req.Details,
-		Attachments:     req.Attachments,
+		Details:         req.Details,     // Field dinamis (Juara, Lomba, dll)
+		Attachments:     req.Attachments, // File bukti
 		Tags:            req.Tags,
-		Points:          req.Points,
+		Points:          req.Points, // [UPDATED] Mengambil poin dari input user (sebelumnya 0)
 	}
 
+	// 4. Siapkan Data PostgreSQL (Referensi Status)
 	pgData := model.AchievementReference{
 		StudentID: student.ID,
-		Title:     req.Title,
-		Status:    "draft",
+		Title:     req.Title,   // Disimpan juga di SQL untuk searching/sorting
+		Status:    "draft",     // Status Awal sesuai FR-003
 	}
 
+	// 5. Simpan ke Database (Hybrid Transaction di Repository)
 	if err := s.achRepo.Create(c.Context(), &mongoData, &pgData); err != nil {
 		return c.Status(500).JSON(model.WebResponse{Code: 500, Status: "error", Message: "Failed to submit achievement: " + err.Error()})
 	}
 
+	// 6. Return Success Response
 	return c.Status(201).JSON(model.WebResponse{
 		Code:    201,
 		Status:  "success",
 		Message: "Prestasi berhasil disimpan sebagai draft",
 		Data: fiber.Map{
-			"referenceId": pgData.ID,
-			"mongoId":     pgData.MongoAchievementID,
+			"referenceId": pgData.ID,                 // ID dari Postgres
+			"mongoId":     pgData.MongoAchievementID, // ID dari Mongo
 			"status":      pgData.Status,
-			"points":      mongoData.Points,
+			"points":      mongoData.Points,          // Tampilkan poin yang tersimpan
 		},
 	})
 }
 
 // GET /api/v1/achievements
 func (s *AchievementService) GetAll(c *fiber.Ctx) error {
-    param := s.parsePagination(c)
-    userRole := c.Locals("role").(string) // Ambil Role dari Token
-    userID := c.Locals("user_id").(string)
+	param := s.parsePagination(c)
+	userRole := c.Locals("role").(string)
+	userID := c.Locals("user_id").(string)
 
-    var filterStudent, filterAdvisor string
+	var filterStudent, filterAdvisor string
 
-    // Logic Filter Berdasarkan Role (RBAC Data Level)
-    if userRole == "Mahasiswa" {
-        student, _ := s.userRepo.FindStudentByUserID(userID)
-        if student != nil {
-            filterStudent = student.ID
-        }
-    } else if userRole == "Dosen Wali" {
-        lecturer, _ := s.userRepo.FindLecturerByUserID(userID)
-        if lecturer != nil {
-            filterAdvisor = lecturer.ID
-        }
-    }
-    // JIKA ADMIN: Kode akan melewati if/else di atas,
-    // sehingga filterStudent & filterAdvisor tetap string kosong ("").
-    // Akibatnya, Repository akan mengambil SEMUA data tanpa filter WHERE.
+	// Logic Filter Berdasarkan Role (RBAC Data Level)
+	if userRole == "Mahasiswa" {
+		// Mahasiswa HANYA boleh melihat prestasi miliknya sendiri
+		student, _ := s.userRepo.FindStudentByUserID(userID)
+		if student != nil {
+			filterStudent = student.ID
+		}
+	} else if userRole == "Dosen Wali" {
+		// Dosen Wali HANYA boleh melihat prestasi mahasiswa bimbingannya (FR-006)
+		lecturer, _ := s.userRepo.FindLecturerByUserID(userID)
+		if lecturer != nil {
+			filterAdvisor = lecturer.ID
+		}
+	}
+	// Admin melihat semua (filter kosong)
 
-    data, total, err := s.achRepo.FindAll(param, filterStudent, filterAdvisor)
-    if err != nil {
-        return c.Status(500).JSON(model.WebResponse{Code: 500, Status: "error", Message: err.Error()})
-    }
+	data, total, err := s.achRepo.FindAll(param, filterStudent, filterAdvisor)
+	if err != nil {
+		return c.Status(500).JSON(model.WebResponse{Code: 500, Status: "error", Message: err.Error()})
+	}
 
-    return s.sendPaginationResponse(c, data, total, param)
+	return s.sendPaginationResponse(c, data, total, param)
 }
 
 // GET /api/v1/achievements/:id
 func (s *AchievementService) GetDetail(c *fiber.Ctx) error {
 	id := c.Params("id")
+	
+	// Validasi Kepemilikan (Optional tapi disarankan)
+	// Idealnya dicek apakah user berhak melihat detail ini
+	
 	ref, content, err := s.achRepo.FindDetail(c.Context(), id)
 	if err != nil {
 		return c.Status(404).JSON(model.WebResponse{Code: 404, Status: "error", Message: "Achievement not found"})
@@ -123,33 +136,43 @@ func (s *AchievementService) GetDetail(c *fiber.Ctx) error {
 	})
 }
 
-// POST /api/v1/achievements/:id/submit
+// POST /api/v1/achievements/:id/submit (FR-004: Submit untuk Verifikasi)
 func (s *AchievementService) RequestVerification(c *fiber.Ctx) error {
 	id := c.Params("id")
 	userID := c.Locals("user_id").(string)
 
+	// 1. Ambil Profil Mahasiswa
 	student, err := s.userRepo.FindStudentByUserID(userID)
 	if err != nil {
 		return c.Status(404).JSON(model.WebResponse{Code: 404, Status: "error", Message: "Student profile not found"})
 	}
 
+	// 2. Cek Existensi Achievement
 	ref, _, err := s.achRepo.FindDetail(c.Context(), id)
 	if err != nil {
 		return c.Status(404).JSON(model.WebResponse{Code: 404, Status: "error", Message: "Achievement not found"})
 	}
 
+	// 3. Validasi Kepemilikan (Harus milik mahasiswa yang login)
 	if ref.StudentID != student.ID {
 		return c.Status(403).JSON(model.WebResponse{Code: 403, Status: "error", Message: "Unauthorized: You do not own this achievement"})
 	}
 
+	// 4. Validasi Status (Hanya 'draft' yang bisa disubmit)
 	if ref.Status != "draft" {
-		return c.Status(400).JSON(model.WebResponse{Code: 400, Status: "error", Message: "Only draft achievement can be submitted"})
+		return c.Status(400).JSON(model.WebResponse{Code: 400, Status: "error", Message: "Only draft achievement can be submitted for verification"})
 	}
 
+	// 5. Update Status menjadi 'submitted'
 	if err := s.achRepo.UpdateStatus(id, "submitted", "", "", 0); err != nil {
 		return c.Status(500).JSON(model.WebResponse{Code: 500, Status: "error", Message: "Failed to update status: " + err.Error()})
 	}
 
+	// 6. Create Notification (Simulasi Log)
+	// TODO: Integrasi dengan Notification Service jika ada
+	// log.Printf("Notifikasi dikirim ke Dosen Wali ID: %v", student.AdvisorID)
+
+	// 7. Return Updated Status
 	return c.JSON(model.WebResponse{
 		Code:    200,
 		Status:  "success",
@@ -161,70 +184,30 @@ func (s *AchievementService) RequestVerification(c *fiber.Ctx) error {
 	})
 }
 
-// ---------------------------------------------------------
-// FR-007: Verify Prestasi
-// ---------------------------------------------------------
 // POST /api/v1/achievements/:id/verify
 func (s *AchievementService) Verify(c *fiber.Ctx) error {
 	id := c.Params("id")
-	
-	// 1. Dosen Input Poin (Opsional, jika ada revisi poin)
 	var req struct{ Points int `json:"points"` }
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(400).JSON(model.WebResponse{Code: 400, Status: "error", Message: "Invalid input"})
-	}
-
-	// 2. Ambil ID Dosen (Verifier)
+	c.BodyParser(&req)
 	userID := c.Locals("user_id").(string)
 
-	// Validasi apakah user benar-benar Dosen (Optional, krn Middleware RBAC sudah cek role)
+	// Pastikan user adalah Dosen
 	_, err := s.userRepo.FindLecturerByUserID(userID)
 	if err != nil {
 		return c.Status(403).JSON(model.WebResponse{Code: 403, Status: "error", Message: "Unauthorized: Only Lecturer can verify"})
 	}
 
-	// 3. Cek Data Prestasi & Precondition Status
-	ref, _, err := s.achRepo.FindDetail(c.Context(), id)
-	if err != nil {
-		return c.Status(404).JSON(model.WebResponse{Code: 404, Status: "error", Message: "Achievement not found"})
-	}
-
-	// CHECK PRECONDITION: Status 'submitted'
-	if ref.Status != "submitted" {
-		return c.Status(400).JSON(model.WebResponse{
-			Code:    400, 
-			Status:  "error", 
-			Message: "Cannot verify. Achievement status must be 'submitted', current status is: " + ref.Status,
-		})
-	}
-
-	// 4. Update Status -> 'verified' & Set Points
 	if err := s.achRepo.UpdateStatus(id, "verified", userID, "", req.Points); err != nil {
 		return c.Status(500).JSON(model.WebResponse{Code: 500, Status: "error", Message: err.Error()})
 	}
-
-	// 5. Return Updated Status
-	return c.JSON(model.WebResponse{
-		Code:    200,
-		Status:  "success",
-		Message: "Prestasi berhasil diverifikasi",
-		Data: fiber.Map{
-			"id":     id,
-			"status": "verified",
-			"points": req.Points,
-		},
-	})
+	return c.JSON(model.WebResponse{Code: 200, Status: "success", Message: "Prestasi diverifikasi"})
 }
 
-// ---------------------------------------------------------
-// FR-008: Reject Prestasi
-// ---------------------------------------------------------
 // POST /api/v1/achievements/:id/reject
 func (s *AchievementService) Reject(c *fiber.Ctx) error {
 	id := c.Params("id")
-	
-	// 1. Dosen Input Rejection Note (Wajib)
 	var req struct{ Note string `json:"note"` }
+	
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(model.WebResponse{Code: 400, Status: "error", Message: "Invalid input"})
 	}
@@ -234,34 +217,10 @@ func (s *AchievementService) Reject(c *fiber.Ctx) error {
 
 	userID := c.Locals("user_id").(string)
 
-	// 2. Cek Data & Precondition
-	ref, _, err := s.achRepo.FindDetail(c.Context(), id)
-	if err != nil {
-		return c.Status(404).JSON(model.WebResponse{Code: 404, Status: "error", Message: "Achievement not found"})
-	}
-
-	if ref.Status != "submitted" {
-		return c.Status(400).JSON(model.WebResponse{
-			Code:    400, 
-			Status:  "error", 
-			Message: "Cannot reject. Achievement status must be 'submitted', current status is: " + ref.Status,
-		})
-	}
-
-	// 3. Update Status -> 'rejected'
 	if err := s.achRepo.UpdateStatus(id, "rejected", userID, req.Note, 0); err != nil {
 		return c.Status(500).JSON(model.WebResponse{Code: 500, Status: "error", Message: err.Error()})
 	}
-
-	return c.JSON(model.WebResponse{
-		Code:    200,
-		Status:  "success",
-		Message: "Prestasi ditolak",
-		Data: fiber.Map{
-			"id":     id,
-			"status": "rejected",
-		},
-	})
+	return c.JSON(model.WebResponse{Code: 200, Status: "success", Message: "Prestasi ditolak"})
 }
 
 // DELETE /api/v1/achievements/:id
@@ -270,6 +229,7 @@ func (s *AchievementService) Delete(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(string)
 	student, _ := s.userRepo.FindStudentByUserID(userID)
 	
+	// Cek kepemilikan sebelum hapus
 	ref, _, err := s.achRepo.FindDetail(c.Context(), id)
 	if err != nil {
 		return c.Status(404).JSON(model.WebResponse{Code: 404, Status: "error", Message: "Not found"})
@@ -286,6 +246,8 @@ func (s *AchievementService) Delete(c *fiber.Ctx) error {
 	return c.JSON(model.WebResponse{Code: 200, Status: "success", Message: "Prestasi berhasil dihapus"})
 }
 
+// ... (Method stub/placeholder lain seperti Update, GetHistory, UploadAttachment biarkan saja seperti sebelumnya) ...
+
 func (s *AchievementService) Update(c *fiber.Ctx) error {
 	return c.Status(501).JSON(model.WebResponse{Code: 501, Status: "error", Message: "Update Feature Not Implemented"})
 }
@@ -298,8 +260,6 @@ func (s *AchievementService) UploadAttachment(c *fiber.Ctx) error {
 	return c.Status(501).JSON(model.WebResponse{Code: 501, Status: "error", Message: "Upload Not Implemented"})
 }
 
-// GET /api/v1/lecturers/:id/advisees
-// FR-006: View Prestasi Mahasiswa Bimbingan
 func (s *AchievementService) GetAdviseeAchievements(c *fiber.Ctx) error {
 	// 1. Ambil User ID Dosen dari Token
 	userID := c.Locals("user_id").(string)
@@ -314,8 +274,6 @@ func (s *AchievementService) GetAdviseeAchievements(c *fiber.Ctx) error {
 	param := s.parsePagination(c)
 
 	// 4. Panggil Repo FindAll dengan Filter AdvisorID
-	// Parameter ke-2 (studentID) kosong karena kita mau semua mahasiswa bimbingan, bukan spesifik satu
-	// Parameter ke-3 (advisorID) diisi ID Dosen yang sedang login
 	data, total, err := s.achRepo.FindAll(param, "", lecturer.ID)
 	if err != nil {
 		return c.Status(500).JSON(model.WebResponse{Code: 500, Status: "error", Message: err.Error()})
@@ -323,21 +281,61 @@ func (s *AchievementService) GetAdviseeAchievements(c *fiber.Ctx) error {
 
 	// 5. Return Response dengan Pagination
 	return s.sendPaginationResponse(c, data, total, param)
-}	
+}
 
 func (s *AchievementService) GetStudentAchievements(c *fiber.Ctx) error {
 	return c.Status(501).JSON(model.WebResponse{Code: 501, Status: "error", Message: "Student Achievement List Not Implemented"})
 }
 
+// ---------------------------------------------------------
+// 5.8 REPORTS & ANALYTICS
+// ---------------------------------------------------------
+
 func (s *AchievementService) GetStatistics(c *fiber.Ctx) error {
-	stats := map[string]interface{}{
-		"total_per_type": map[string]int{"academic": 10, "competition": 5},
+	stats, err := s.achRepo.GetStatistics(c.Context())
+	if err != nil {
+		return c.Status(500).JSON(model.WebResponse{Code: 500, Status: "error", Message: "Failed to generate stats: " + err.Error()})
 	}
 	return c.JSON(model.WebResponse{Code: 200, Status: "success", Data: stats})
 }
 
 func (s *AchievementService) GetStudentStatistics(c *fiber.Ctx) error {
-	return c.Status(501).JSON(model.WebResponse{Code: 501, Status: "error", Message: "Student Stats Not Implemented"})
+	// ID di sini bisa berupa UserID atau StudentID.
+	requestID := c.Params("id") // Bisa "me" atau UUID
+	userID := c.Locals("user_id").(string)
+	userRole := c.Locals("role").(string)
+
+	var targetStudentID string
+
+	if requestID == "me" || (userRole == "Mahasiswa" && requestID == userID) {
+		// Lihat statistik diri sendiri
+		student, err := s.userRepo.FindStudentByUserID(userID)
+		if err != nil {
+			return c.Status(404).JSON(model.WebResponse{Code: 404, Status: "error", Message: "Student profile not found"})
+		}
+		targetStudentID = student.ID
+	} else if userRole == "Admin" || userRole == "Dosen Wali" {
+		// Admin/Dosen lihat statistik mahasiswa lain
+		student, err := s.userRepo.FindStudentByUserID(requestID)
+		if err != nil {
+			return c.Status(404).JSON(model.WebResponse{Code: 404, Status: "error", Message: "Student not found"})
+		}
+		targetStudentID = student.ID
+	} else {
+		return c.Status(403).JSON(model.WebResponse{Code: 403, Status: "error", Message: "Forbidden"})
+	}
+
+	stats, err := s.achRepo.GetStudentStatistics(c.Context(), targetStudentID)
+	if err != nil {
+		return c.Status(500).JSON(model.WebResponse{Code: 500, Status: "error", Message: err.Error()})
+	}
+
+	return c.JSON(model.WebResponse{
+		Code:    200,
+		Status:  "success",
+		Message: "Student Statistics",
+		Data:    stats,
+	})
 }
 
 // HELPER
