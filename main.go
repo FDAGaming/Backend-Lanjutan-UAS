@@ -4,11 +4,11 @@ import (
 	"log"
 	"os"
 
-	"uas/middleware"
 	"uas/app/repository"
-	"uas/route"
 	"uas/app/service"
-	"uas/database" 
+	"uas/database"
+	"uas/middleware"
+	"uas/route"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
@@ -26,7 +26,6 @@ func main() {
 	// Config ini otomatis melakukan Manual Migration untuk Postgres (Native SQL)
 	// Return type: *config.DatabaseInstances { Postgres: *sql.DB, Mongo: *mongo.Database }
 	db := database.InitDB()
-
 
 	// 3. Setup Repositories (Data Access Layer)
 	// ---------------------------------------------------------
@@ -73,12 +72,16 @@ func main() {
 	app.Use(logger.New()) // Log request ke terminal
 	app.Use(cors.New())   // Enable CORS
 
-	// 7. Setup Routes (Wiring Semua Komponen)
+	// 7. Static File Serving for Uploads
+	// ---------------------------------------------------------
+	app.Static("/uploads", "./uploads")
+
+	// 8. Setup Routes (Wiring Semua Komponen)
 	// ---------------------------------------------------------
 	// Mengirimkan app, services, dan middleware ke router
 	route.SetupRoutes(app, authService, achService, authMiddleware)
 
-	// 8. Start Server
+	// 9. Start Server
 	// ---------------------------------------------------------
 	port := os.Getenv("PORT")
 	if port == "" {

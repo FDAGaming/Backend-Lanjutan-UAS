@@ -1,9 +1,12 @@
 package service
 
 import (
+	"fmt"
 	"math"
+	"time"
 	"uas/app/model"
 	"uas/app/repository"
+
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/gofiber/fiber/v2"
@@ -59,8 +62,8 @@ func (s *AchievementService) Submit(c *fiber.Ctx) error {
 	// 4. Siapkan Data PostgreSQL (Referensi Status)
 	pgData := model.AchievementReference{
 		StudentID: student.ID,
-		Title:     req.Title,   // Disimpan juga di SQL untuk searching/sorting
-		Status:    "draft",     // Status Awal sesuai FR-003
+		Title:     req.Title, // Disimpan juga di SQL untuk searching/sorting
+		Status:    "draft",   // Status Awal sesuai FR-003
 	}
 
 	// 5. Simpan ke Database (Hybrid Transaction di Repository)
@@ -77,7 +80,7 @@ func (s *AchievementService) Submit(c *fiber.Ctx) error {
 			"referenceId": pgData.ID,                 // ID dari Postgres
 			"mongoId":     pgData.MongoAchievementID, // ID dari Mongo
 			"status":      pgData.Status,
-			"points":      mongoData.Points,          // Tampilkan poin yang tersimpan
+			"points":      mongoData.Points, // Tampilkan poin yang tersimpan
 		},
 	})
 }
@@ -117,10 +120,10 @@ func (s *AchievementService) GetAll(c *fiber.Ctx) error {
 // GET /api/v1/achievements/:id
 func (s *AchievementService) GetDetail(c *fiber.Ctx) error {
 	id := c.Params("id")
-	
+
 	// Validasi Kepemilikan (Optional tapi disarankan)
 	// Idealnya dicek apakah user berhak melihat detail ini
-	
+
 	ref, content, err := s.achRepo.FindDetail(c.Context(), id)
 	if err != nil {
 		return c.Status(404).JSON(model.WebResponse{Code: 404, Status: "error", Message: "Achievement not found"})
@@ -168,9 +171,24 @@ func (s *AchievementService) RequestVerification(c *fiber.Ctx) error {
 		return c.Status(500).JSON(model.WebResponse{Code: 500, Status: "error", Message: "Failed to update status: " + err.Error()})
 	}
 
-	// 6. Create Notification (Simulasi Log)
-	// TODO: Integrasi dengan Notification Service jika ada
-	// log.Printf("Notifikasi dikirim ke Dosen Wali ID: %v", student.AdvisorID)
+	// 6. Create Notification untuk Dosen Wali
+	if student.AdvisorID != nil && *student.AdvisorID != "" {
+		// Log notification (bisa diganti dengan email/push notification service)
+		fmt.Printf("[NOTIFICATION] Prestasi baru untuk verifikasi:\n")
+		fmt.Printf("  - Student: %s (%s)\n", student.User.FullName, student.StudentID)
+		fmt.Printf("  - Achievement: %s\n", ref.Title)
+		fmt.Printf("  - Advisor ID: %s\n", *student.AdvisorID)
+		fmt.Printf("  - Status: submitted\n")
+		fmt.Printf("  - Time: %s\n", time.Now().Format("2006-01-02 15:04:05"))
+
+		// TODO: Implement actual notification service
+		// - Email notification ke dosen wali
+		// - Push notification ke mobile app
+		// - In-app notification system
+		// - SMS notification (optional)
+	} else {
+		fmt.Printf("[WARNING] Student %s tidak memiliki dosen wali yang ditugaskan\n", student.StudentID)
+	}
 
 	// 7. Return Updated Status
 	return c.JSON(model.WebResponse{
@@ -187,7 +205,9 @@ func (s *AchievementService) RequestVerification(c *fiber.Ctx) error {
 // POST /api/v1/achievements/:id/verify
 func (s *AchievementService) Verify(c *fiber.Ctx) error {
 	id := c.Params("id")
-	var req struct{ Points int `json:"points"` }
+	var req struct {
+		Points int `json:"points"`
+	}
 	c.BodyParser(&req)
 	userID := c.Locals("user_id").(string)
 
@@ -206,8 +226,10 @@ func (s *AchievementService) Verify(c *fiber.Ctx) error {
 // POST /api/v1/achievements/:id/reject
 func (s *AchievementService) Reject(c *fiber.Ctx) error {
 	id := c.Params("id")
-	var req struct{ Note string `json:"note"` }
-	
+	var req struct {
+		Note string `json:"note"`
+	}
+
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(model.WebResponse{Code: 400, Status: "error", Message: "Invalid input"})
 	}
@@ -223,27 +245,53 @@ func (s *AchievementService) Reject(c *fiber.Ctx) error {
 	return c.JSON(model.WebResponse{Code: 200, Status: "success", Message: "Prestasi ditolak"})
 }
 
-// DELETE /api/v1/achievements/:id
+// DELETE /api/v1/achievements/:id (FR-005: Soft Delete Draft)
 func (s *AchievementService) Delete(c *fiber.Ctx) error {
 	id := c.Params("id")
 	userID := c.Locals("user_id").(string)
-	student, _ := s.userRepo.FindStudentByUserID(userID)
-	
-	// Cek kepemilikan sebelum hapus
+
+	// 1. Validasi user adalah mahasiswa
+	student, err := s.userRepo.FindStudentByUserID(userID)
+	if err != nil {
+		return c.Status(404).JSON(model.WebResponse{Code: 404, Status: "error", Message: "Student profile not found"})
+	}
+
+	// 2. Cek existensi dan kepemilikan achievement
 	ref, _, err := s.achRepo.FindDetail(c.Context(), id)
 	if err != nil {
-		return c.Status(404).JSON(model.WebResponse{Code: 404, Status: "error", Message: "Not found"})
-	}
-	
-	if student != nil && ref.StudentID != student.ID {
-		return c.Status(403).JSON(model.WebResponse{Code: 403, Status: "error", Message: "Forbidden"})
+		return c.Status(404).JSON(model.WebResponse{Code: 404, Status: "error", Message: "Achievement not found"})
 	}
 
+	// 3. Validasi kepemilikan
+	if ref.StudentID != student.ID {
+		return c.Status(403).JSON(model.WebResponse{Code: 403, Status: "error", Message: "Unauthorized: You do not own this achievement"})
+	}
+
+	// 4. Validasi status (hanya draft yang bisa dihapus)
+	if ref.Status != "draft" {
+		return c.Status(400).JSON(model.WebResponse{Code: 400, Status: "error", Message: "Only draft achievements can be deleted"})
+	}
+
+	// 5. Soft delete achievement
 	if err := s.achRepo.Delete(c.Context(), id); err != nil {
-		return c.Status(400).JSON(model.WebResponse{Code: 400, Status: "error", Message: err.Error()})
+		return c.Status(500).JSON(model.WebResponse{Code: 500, Status: "error", Message: "Failed to delete achievement: " + err.Error()})
 	}
 
-	return c.JSON(model.WebResponse{Code: 200, Status: "success", Message: "Prestasi berhasil dihapus"})
+	// 6. Log deletion
+	fmt.Printf("[SOFT DELETE] Achievement deleted:\n")
+	fmt.Printf("  - Student: %s (%s)\n", student.User.FullName, student.StudentID)
+	fmt.Printf("  - Achievement: %s\n", ref.Title)
+	fmt.Printf("  - Time: %s\n", time.Now().Format("2006-01-02 15:04:05"))
+
+	return c.JSON(model.WebResponse{
+		Code:    200,
+		Status:  "success",
+		Message: "Prestasi berhasil dihapus",
+		Data: fiber.Map{
+			"id":     id,
+			"status": "deleted",
+		},
+	})
 }
 
 // ... (Method stub/placeholder lain seperti Update, GetHistory, UploadAttachment biarkan saja seperti sebelumnya) ...
@@ -257,7 +305,57 @@ func (s *AchievementService) GetHistory(c *fiber.Ctx) error {
 }
 
 func (s *AchievementService) UploadAttachment(c *fiber.Ctx) error {
-	return c.Status(501).JSON(model.WebResponse{Code: 501, Status: "error", Message: "Upload Not Implemented"})
+	achievementID := c.Params("id")
+
+	// Parse multipart form
+	file, err := c.FormFile("file")
+	if err != nil {
+		return c.Status(400).JSON(model.WebResponse{Code: 400, Status: "error", Message: "No file uploaded"})
+	}
+
+	// Validate file size (max 2MB)
+	if file.Size > 2*1024*1024 {
+		return c.Status(400).JSON(model.WebResponse{Code: 400, Status: "error", Message: "File size exceeds 2MB limit"})
+	}
+
+	// Validate file type
+	allowedTypes := map[string]bool{
+		"image/jpeg": true, "image/png": true, "image/jpg": true,
+		"application/pdf": true, "application/msword": true,
+		"application/vnd.openxmlformats-officedocument.wordprocessingml.document": true,
+	}
+
+	if !allowedTypes[file.Header.Get("Content-Type")] {
+		return c.Status(400).JSON(model.WebResponse{Code: 400, Status: "error", Message: "Invalid file type"})
+	}
+
+	// Generate unique filename
+	filename := fmt.Sprintf("%d_%s", time.Now().Unix(), file.Filename)
+	filepath := fmt.Sprintf("./uploads/%s", filename)
+
+	// Save file
+	if err := c.SaveFile(file, filepath); err != nil {
+		return c.Status(500).JSON(model.WebResponse{Code: 500, Status: "error", Message: "Failed to save file"})
+	}
+
+	// Create attachment object
+	attachment := model.AchievementAttachment{
+		FileName:   file.Filename,
+		FileURL:    fmt.Sprintf("/uploads/%s", filename),
+		FileType:   file.Header.Get("Content-Type"),
+		UploadedAt: time.Now(),
+	}
+
+	// Update achievement in MongoDB
+	if err := s.achRepo.AddAttachment(c.Context(), achievementID, attachment); err != nil {
+		return c.Status(500).JSON(model.WebResponse{Code: 500, Status: "error", Message: "Failed to update achievement"})
+	}
+
+	return c.JSON(model.WebResponse{
+		Code: 200, Status: "success",
+		Message: "File uploaded successfully",
+		Data:    attachment,
+	})
 }
 
 func (s *AchievementService) GetAdviseeAchievements(c *fiber.Ctx) error {

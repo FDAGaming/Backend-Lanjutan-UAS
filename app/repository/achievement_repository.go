@@ -71,6 +71,31 @@ func (r *AchievementRepository) Create(ctx context.Context, content *model.Achie
 	return nil
 }
 
+// --- ADD ATTACHMENT ---
+func (r *AchievementRepository) AddAttachment(ctx context.Context, refID string, attachment model.AchievementAttachment) error {
+	// 1. Get MongoDB ID from PostgreSQL reference
+	var mongoID string
+	err := r.pgDB.QueryRow("SELECT mongo_achievement_id FROM achievement_references WHERE id = $1", refID).Scan(&mongoID)
+	if err != nil {
+		return errors.New("achievement reference not found")
+	}
+
+	// 2. Convert to ObjectID
+	objID, err := primitive.ObjectIDFromHex(mongoID)
+	if err != nil {
+		return errors.New("invalid mongo id format")
+	}
+
+	// 3. Add attachment to MongoDB document
+	_, err = r.mongoColl.UpdateOne(
+		ctx,
+		bson.M{"_id": objID},
+		bson.M{"$push": bson.M{"attachments": attachment}},
+	)
+
+	return err
+}
+
 // --- FIND ALL (PAGINATION, SORT, SEARCH) ---
 func (r *AchievementRepository) FindAll(param model.PaginationParam, studentID string, advisorID string) ([]model.AchievementReference, int64, error) {
 	var achievements []model.AchievementReference
@@ -103,6 +128,11 @@ func (r *AchievementRepository) FindAll(param model.PaginationParam, studentID s
 		args = append(args, advisorID)
 		argId++
 	}
+
+	// Exclude soft deleted records
+	conditions = append(conditions, fmt.Sprintf("ar.status != $%d", argId))
+	args = append(args, "deleted")
+	argId++
 
 	// Search Logic (Title OR Status)
 	if param.Search != "" {
@@ -164,7 +194,7 @@ func (r *AchievementRepository) FindAll(param model.PaginationParam, studentID s
 
 	for rows.Next() {
 		var ar model.AchievementReference
-		ar.Student = &model.Student{User: &model.User{}} 
+		ar.Student = &model.Student{User: &model.User{}}
 
 		var subAt, verAt sql.NullTime
 		var verBy sql.NullString
@@ -173,17 +203,21 @@ func (r *AchievementRepository) FindAll(param model.PaginationParam, studentID s
 		err := rows.Scan(
 			&ar.ID, &ar.StudentID, &ar.MongoAchievementID, &ar.Title, &ar.Status,
 			&subAt, &verAt, &verBy, &rejNote, &ar.CreatedAt, &ar.UpdatedAt,
-			&ar.Student.User.FullName, &ar.Student.StudentID, 
+			&ar.Student.User.FullName, &ar.Student.StudentID,
 		)
 		if err != nil {
 			return nil, 0, err
 		}
 
-		if subAt.Valid { ar.SubmittedAt = &subAt.Time }
-		if verAt.Valid { ar.VerifiedAt = &verAt.Time }
-		if verBy.Valid { 
+		if subAt.Valid {
+			ar.SubmittedAt = &subAt.Time
+		}
+		if verAt.Valid {
+			ar.VerifiedAt = &verAt.Time
+		}
+		if verBy.Valid {
 			str := verBy.String
-			ar.VerifiedBy = &str 
+			ar.VerifiedBy = &str
 		}
 		ar.RejectionNote = rejNote.String
 
@@ -206,7 +240,7 @@ func (r *AchievementRepository) FindDetail(ctx context.Context, id string) (*mod
 		JOIN students s ON ar.student_id = s.id
 		JOIN users u ON s.user_id = u.id
 		LEFT JOIN users ver_u ON ar.verified_by = ver_u.id
-		WHERE ar.id = $1`
+		WHERE ar.id = $1 AND ar.status != 'deleted'`
 
 	var ref model.AchievementReference
 	ref.Student = &model.Student{User: &model.User{}}
@@ -231,8 +265,12 @@ func (r *AchievementRepository) FindDetail(ctx context.Context, id string) (*mod
 		return nil, nil, err
 	}
 
-	if subAt.Valid { ref.SubmittedAt = &subAt.Time }
-	if verAt.Valid { ref.VerifiedAt = &verAt.Time }
+	if subAt.Valid {
+		ref.SubmittedAt = &subAt.Time
+	}
+	if verAt.Valid {
+		ref.VerifiedAt = &verAt.Time
+	}
 	if verBy.Valid {
 		str := verBy.String
 		ref.VerifiedBy = &str
@@ -263,9 +301,9 @@ func (r *AchievementRepository) UpdateStatus(id string, status string, verifiedB
 		SET status = $1, updated_at = $2, verified_by = $3, verified_at = $4, rejection_note = $5
 		WHERE id = $6
 		RETURNING mongo_achievement_id`
-	
+
 	now := time.Now()
-	
+
 	var verBy interface{} = nil
 	if verifiedBy != "" {
 		verBy = verifiedBy
@@ -283,8 +321,8 @@ func (r *AchievementRepository) UpdateStatus(id string, status string, verifiedB
 		if err == nil {
 			// Update field "points" di dokumen MongoDB
 			_, err = r.mongoColl.UpdateOne(
-				context.Background(), 
-				bson.M{"_id": objID}, 
+				context.Background(),
+				bson.M{"_id": objID},
 				bson.M{"$set": bson.M{"points": points}},
 			)
 			if err != nil {
@@ -296,40 +334,67 @@ func (r *AchievementRepository) UpdateStatus(id string, status string, verifiedB
 	return nil
 }
 
-// --- DELETE ---
+// --- SOFT DELETE ---
 func (r *AchievementRepository) Delete(ctx context.Context, id string) error {
 	var mongoID string
 	var status string
-	
+
+	// 1. Get achievement info
 	err := r.pgDB.QueryRow("SELECT mongo_achievement_id, status FROM achievement_references WHERE id = $1", id).Scan(&mongoID, &status)
 	if err != nil {
+		if err == sql.ErrNoRows {
+			return errors.New("achievement not found")
+		}
 		return err
 	}
 
+	// 2. Check precondition: only draft can be deleted
 	if status != "draft" {
 		return errors.New("cannot delete submitted or verified achievement")
 	}
 
-	_, err = r.pgDB.Exec("DELETE FROM achievement_references WHERE id = $1", id)
+	// 3. Soft delete in PostgreSQL (update status to 'deleted')
+	now := time.Now()
+	_, err = r.pgDB.Exec(
+		"UPDATE achievement_references SET status = $1, updated_at = $2 WHERE id = $3",
+		"deleted", now, id,
+	)
 	if err != nil {
-		return err
+		return errors.New("failed to soft delete reference: " + err.Error())
 	}
 
+	// 4. Soft delete in MongoDB (add deleted flag and timestamp)
 	if mongoID != "" {
-		objID, _ := primitive.ObjectIDFromHex(mongoID)
-		_, err := r.mongoColl.DeleteOne(ctx, bson.M{"_id": objID})
-		return err
+		objID, err := primitive.ObjectIDFromHex(mongoID)
+		if err != nil {
+			return errors.New("invalid mongo id format")
+		}
+
+		_, err = r.mongoColl.UpdateOne(
+			ctx,
+			bson.M{"_id": objID},
+			bson.M{
+				"$set": bson.M{
+					"isDeleted": true,
+					"deletedAt": now,
+					"updatedAt": now,
+				},
+			},
+		)
+		if err != nil {
+			return errors.New("failed to soft delete achievement: " + err.Error())
+		}
 	}
-	
+
 	return nil
 }
 
 // --- STATISTICS (FR-011) ---
 
 type StatsResult struct {
-	TotalPerType      map[string]int `json:"totalPerType"`
-	TotalPerLevel     map[string]int `json:"totalPerLevel"`
-	TopStudents       []TopStudent   `json:"topStudents"`
+	TotalPerType  map[string]int `json:"totalPerType"`
+	TotalPerLevel map[string]int `json:"totalPerLevel"`
+	TopStudents   []TopStudent   `json:"topStudents"`
 }
 
 type TopStudent struct {
@@ -383,7 +448,9 @@ func (r *AchievementRepository) GetStatistics(ctx context.Context) (*StatsResult
 		if err = cursorLevel.All(ctx, &levelStats); err == nil {
 			for _, s := range levelStats {
 				key := s.ID
-				if key == "" { key = "unknown" }
+				if key == "" {
+					key = "unknown"
+				}
 				result.TotalPerLevel[key] = s.Count
 			}
 		}
@@ -399,7 +466,7 @@ func (r *AchievementRepository) GetStatistics(ctx context.Context) (*StatsResult
 			{Key: "totalPoints", Value: bson.D{{Key: "$sum", Value: "$points"}}},
 		}}},
 		{{Key: "$sort", Value: bson.D{{Key: "totalPoints", Value: -1}}}}, // Sort Descending
-		{{Key: "$limit", Value: 5}}, // Top 5
+		{{Key: "$limit", Value: 5}},                                      // Top 5
 	}
 
 	cursorTop, err := r.mongoColl.Aggregate(ctx, pipelineTop)
@@ -408,12 +475,12 @@ func (r *AchievementRepository) GetStatistics(ctx context.Context) (*StatsResult
 			StudentID   string `bson:"_id"`
 			TotalPoints int    `bson:"totalPoints"`
 		}
-		
+
 		if err = cursorTop.All(ctx, &topList); err == nil {
 			// Loop aggregation results and get student name from Postgres
 			for _, t := range topList {
 				var name, program string
-				
+
 				// Query to students & users table
 				// Ensure studentID is valid in Postgres
 				queryUser := `
@@ -421,12 +488,12 @@ func (r *AchievementRepository) GetStatistics(ctx context.Context) (*StatsResult
 					FROM students s 
 					JOIN users u ON s.user_id = u.id 
 					WHERE s.id = $1`
-				
+
 				err := r.pgDB.QueryRow(queryUser, t.StudentID).Scan(&name, &program)
 				if err != nil {
 					// If user not found in Postgres (e.g. zombie data in Mongo), skip or set "Unknown"
 					// fmt.Printf("Warning: Student ID %s not found in Postgres\n", t.StudentID)
-					continue 
+					continue
 				}
 
 				result.TopStudents = append(result.TopStudents, TopStudent{
