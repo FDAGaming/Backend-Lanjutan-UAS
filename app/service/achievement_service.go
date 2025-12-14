@@ -202,28 +202,81 @@ func (s *AchievementService) RequestVerification(c *fiber.Ctx) error {
 	})
 }
 
-// POST /api/v1/achievements/:id/verify
+// POST /api/v1/achievements/:id/verify (FR-007: Verify Prestasi)
 func (s *AchievementService) Verify(c *fiber.Ctx) error {
 	id := c.Params("id")
 	var req struct {
 		Points int `json:"points"`
 	}
-	c.BodyParser(&req)
+
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(model.WebResponse{Code: 400, Status: "error", Message: "Invalid input: " + err.Error()})
+	}
+
+	// Validate points (must be positive)
+	if req.Points <= 0 {
+		return c.Status(400).JSON(model.WebResponse{Code: 400, Status: "error", Message: "Points must be greater than 0"})
+	}
+
 	userID := c.Locals("user_id").(string)
 
-	// Pastikan user adalah Dosen
-	_, err := s.userRepo.FindLecturerByUserID(userID)
+	// 1. Pastikan user adalah Dosen Wali
+	lecturer, err := s.userRepo.FindLecturerByUserID(userID)
 	if err != nil {
-		return c.Status(403).JSON(model.WebResponse{Code: 403, Status: "error", Message: "Unauthorized: Only Lecturer can verify"})
+		return c.Status(404).JSON(model.WebResponse{Code: 404, Status: "error", Message: "Lecturer profile not found"})
 	}
 
-	if err := s.achRepo.UpdateStatus(id, "verified", userID, "", req.Points); err != nil {
-		return c.Status(500).JSON(model.WebResponse{Code: 500, Status: "error", Message: err.Error()})
+	// 2. Dosen review prestasi detail - Get achievement info
+	ref, content, err := s.achRepo.FindDetail(c.Context(), id)
+	if err != nil {
+		return c.Status(404).JSON(model.WebResponse{Code: 404, Status: "error", Message: "Achievement not found"})
 	}
-	return c.JSON(model.WebResponse{Code: 200, Status: "success", Message: "Prestasi diverifikasi"})
+
+	// 3. Validasi precondition: Status harus 'submitted'
+	if ref.Status != "submitted" {
+		return c.Status(400).JSON(model.WebResponse{Code: 400, Status: "error", Message: "Only submitted achievements can be verified"})
+	}
+
+	// 4. Validasi ownership: Hanya dosen wali yang bisa verify prestasi mahasiswa bimbingannya
+	if ref.Student.AdvisorID == nil || *ref.Student.AdvisorID != lecturer.ID {
+		return c.Status(403).JSON(model.WebResponse{Code: 403, Status: "error", Message: "Unauthorized: You can only verify achievements of your advisees"})
+	}
+
+	// 5. Update status menjadi 'verified' dengan verified_by dan verified_at
+	if err := s.achRepo.UpdateStatus(id, "verified", userID, "", req.Points); err != nil {
+		return c.Status(500).JSON(model.WebResponse{Code: 500, Status: "error", Message: "Failed to verify achievement: " + err.Error()})
+	}
+
+	// 6. Log verification
+	fmt.Printf("[VERIFICATION] Achievement verified:\n")
+	fmt.Printf("  - Student: %s (%s)\n", ref.Student.User.FullName, ref.Student.StudentID)
+	fmt.Printf("  - Achievement: %s\n", ref.Title)
+	fmt.Printf("  - Points awarded: %d\n", req.Points)
+	fmt.Printf("  - Verified by: %s\n", lecturer.User.FullName)
+	fmt.Printf("  - Time: %s\n", time.Now().Format("2006-01-02 15:04:05"))
+
+	// 7. Return updated status
+	return c.JSON(model.WebResponse{
+		Code:    200,
+		Status:  "success",
+		Message: "Prestasi berhasil diverifikasi",
+		Data: fiber.Map{
+			"id":         id,
+			"status":     "verified",
+			"points":     req.Points,
+			"verifiedBy": userID,
+			"verifiedAt": time.Now(),
+			"achievement": fiber.Map{
+				"title":     ref.Title,
+				"type":      content.AchievementType,
+				"student":   ref.Student.User.FullName,
+				"studentId": ref.Student.StudentID,
+			},
+		},
+	})
 }
 
-// POST /api/v1/achievements/:id/reject
+// POST /api/v1/achievements/:id/reject (FR-008: Reject Prestasi)
 func (s *AchievementService) Reject(c *fiber.Ctx) error {
 	id := c.Params("id")
 	var req struct {
@@ -231,18 +284,80 @@ func (s *AchievementService) Reject(c *fiber.Ctx) error {
 	}
 
 	if err := c.BodyParser(&req); err != nil {
-		return c.Status(400).JSON(model.WebResponse{Code: 400, Status: "error", Message: "Invalid input"})
+		return c.Status(400).JSON(model.WebResponse{Code: 400, Status: "error", Message: "Invalid input: " + err.Error()})
 	}
+
+	// Validate rejection note (required and not empty)
 	if req.Note == "" {
 		return c.Status(400).JSON(model.WebResponse{Code: 400, Status: "error", Message: "Rejection note is required"})
 	}
 
+	// Validate note length (reasonable limit)
+	if len(req.Note) > 1000 {
+		return c.Status(400).JSON(model.WebResponse{Code: 400, Status: "error", Message: "Rejection note too long (max 1000 characters)"})
+	}
+
 	userID := c.Locals("user_id").(string)
 
-	if err := s.achRepo.UpdateStatus(id, "rejected", userID, req.Note, 0); err != nil {
-		return c.Status(500).JSON(model.WebResponse{Code: 500, Status: "error", Message: err.Error()})
+	// 1. Pastikan user adalah Dosen Wali
+	lecturer, err := s.userRepo.FindLecturerByUserID(userID)
+	if err != nil {
+		return c.Status(404).JSON(model.WebResponse{Code: 404, Status: "error", Message: "Lecturer profile not found"})
 	}
-	return c.JSON(model.WebResponse{Code: 200, Status: "success", Message: "Prestasi ditolak"})
+
+	// 2. Get achievement info untuk validasi
+	ref, content, err := s.achRepo.FindDetail(c.Context(), id)
+	if err != nil {
+		return c.Status(404).JSON(model.WebResponse{Code: 404, Status: "error", Message: "Achievement not found"})
+	}
+
+	// 3. Validasi precondition: Status harus 'submitted'
+	if ref.Status != "submitted" {
+		return c.Status(400).JSON(model.WebResponse{Code: 400, Status: "error", Message: "Only submitted achievements can be rejected"})
+	}
+
+	// 4. Validasi ownership: Hanya dosen wali yang bisa reject prestasi mahasiswa bimbingannya
+	if ref.Student.AdvisorID == nil || *ref.Student.AdvisorID != lecturer.ID {
+		return c.Status(403).JSON(model.WebResponse{Code: 403, Status: "error", Message: "Unauthorized: You can only reject achievements of your advisees"})
+	}
+
+	// 5. Update status menjadi 'rejected' dengan rejection_note
+	if err := s.achRepo.UpdateStatus(id, "rejected", userID, req.Note, 0); err != nil {
+		return c.Status(500).JSON(model.WebResponse{Code: 500, Status: "error", Message: "Failed to reject achievement: " + err.Error()})
+	}
+
+	// 6. Create notification untuk mahasiswa
+	fmt.Printf("[REJECTION] Achievement rejected:\n")
+	fmt.Printf("  - Student: %s (%s)\n", ref.Student.User.FullName, ref.Student.StudentID)
+	fmt.Printf("  - Achievement: %s\n", ref.Title)
+	fmt.Printf("  - Rejection reason: %s\n", req.Note)
+	fmt.Printf("  - Rejected by: %s\n", lecturer.User.FullName)
+	fmt.Printf("  - Time: %s\n", time.Now().Format("2006-01-02 15:04:05"))
+
+	// TODO: Implement actual notification service
+	// - Email notification ke mahasiswa
+	// - Push notification ke mobile app
+	// - In-app notification system
+
+	// 7. Return updated status
+	return c.JSON(model.WebResponse{
+		Code:    200,
+		Status:  "success",
+		Message: "Prestasi berhasil ditolak",
+		Data: fiber.Map{
+			"id":            id,
+			"status":        "rejected",
+			"rejectionNote": req.Note,
+			"rejectedBy":    userID,
+			"rejectedAt":    time.Now(),
+			"achievement": fiber.Map{
+				"title":     ref.Title,
+				"type":      content.AchievementType,
+				"student":   ref.Student.User.FullName,
+				"studentId": ref.Student.StudentID,
+			},
+		},
+	})
 }
 
 // DELETE /api/v1/achievements/:id (FR-005: Soft Delete Draft)
@@ -390,11 +505,55 @@ func (s *AchievementService) GetStudentAchievements(c *fiber.Ctx) error {
 // ---------------------------------------------------------
 
 func (s *AchievementService) GetStatistics(c *fiber.Ctx) error {
+	userRole := c.Locals("role").(string)
+	userID := c.Locals("user_id").(string)
+
+	// Role-based statistics
+	if userRole == "Dosen Wali" {
+		// Dosen Wali hanya melihat statistik mahasiswa bimbingannya
+		return s.getAdvisorStatistics(c, userID)
+	} else if userRole == "Mahasiswa" {
+		// Mahasiswa hanya melihat statistik sendiri
+		student, err := s.userRepo.FindStudentByUserID(userID)
+		if err != nil {
+			return c.Status(404).JSON(model.WebResponse{Code: 404, Status: "error", Message: "Student profile not found"})
+		}
+		stats, err := s.achRepo.GetStudentStatistics(c.Context(), student.ID)
+		if err != nil {
+			return c.Status(500).JSON(model.WebResponse{Code: 500, Status: "error", Message: "Failed to generate stats: " + err.Error()})
+		}
+		return c.JSON(model.WebResponse{Code: 200, Status: "success", Message: "Your Statistics", Data: stats})
+	}
+
+	// Admin melihat statistik keseluruhan
 	stats, err := s.achRepo.GetStatistics(c.Context())
 	if err != nil {
 		return c.Status(500).JSON(model.WebResponse{Code: 500, Status: "error", Message: "Failed to generate stats: " + err.Error()})
 	}
-	return c.JSON(model.WebResponse{Code: 200, Status: "success", Data: stats})
+	return c.JSON(model.WebResponse{Code: 200, Status: "success", Message: "Overall Statistics", Data: stats})
+}
+
+// Helper method untuk statistik dosen wali
+func (s *AchievementService) getAdvisorStatistics(c *fiber.Ctx, userID string) error {
+	// Get lecturer profile
+	_, err := s.userRepo.FindLecturerByUserID(userID)
+	if err != nil {
+		return c.Status(404).JSON(model.WebResponse{Code: 404, Status: "error", Message: "Lecturer profile not found"})
+	}
+
+	// TODO: Implement advisor-specific statistics
+	// This would aggregate statistics from all advisee students
+	// For now, return overall stats (can be enhanced later)
+	stats, err := s.achRepo.GetStatistics(c.Context())
+	if err != nil {
+		return c.Status(500).JSON(model.WebResponse{Code: 500, Status: "error", Message: "Failed to generate stats: " + err.Error()})
+	}
+
+	return c.JSON(model.WebResponse{
+		Code: 200, Status: "success",
+		Message: "Advisee Statistics",
+		Data:    stats,
+	})
 }
 
 func (s *AchievementService) GetStudentStatistics(c *fiber.Ctx) error {

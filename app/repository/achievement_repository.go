@@ -234,7 +234,7 @@ func (r *AchievementRepository) FindDetail(ctx context.Context, id string) (*mod
 		SELECT 
 			ar.id, ar.student_id, ar.mongo_achievement_id, ar.title, ar.status, 
 			ar.submitted_at, ar.verified_at, ar.verified_by, ar.rejection_note, ar.created_at, ar.updated_at,
-			s.student_id, u.full_name,
+			s.student_id, s.advisor_id, u.full_name,
 			ver_u.full_name
 		FROM achievement_references ar
 		JOIN students s ON ar.student_id = s.id
@@ -250,11 +250,12 @@ func (r *AchievementRepository) FindDetail(ctx context.Context, id string) (*mod
 	var verBy sql.NullString
 	var rejNote sql.NullString
 	var verifierName sql.NullString
+	var advisorID sql.NullString
 
 	err := r.pgDB.QueryRow(query, id).Scan(
 		&ref.ID, &ref.StudentID, &ref.MongoAchievementID, &ref.Title, &ref.Status,
 		&subAt, &verAt, &verBy, &rejNote, &ref.CreatedAt, &ref.UpdatedAt,
-		&ref.Student.StudentID, &ref.Student.User.FullName,
+		&ref.Student.StudentID, &advisorID, &ref.Student.User.FullName,
 		&verifierName,
 	)
 
@@ -275,6 +276,10 @@ func (r *AchievementRepository) FindDetail(ctx context.Context, id string) (*mod
 		str := verBy.String
 		ref.VerifiedBy = &str
 		ref.Verifier.FullName = verifierName.String
+	}
+	if advisorID.Valid {
+		str := advisorID.String
+		ref.Student.AdvisorID = &str
 	}
 	ref.RejectionNote = rejNote.String
 
@@ -392,9 +397,19 @@ func (r *AchievementRepository) Delete(ctx context.Context, id string) error {
 // --- STATISTICS (FR-011) ---
 
 type StatsResult struct {
-	TotalPerType  map[string]int `json:"totalPerType"`
-	TotalPerLevel map[string]int `json:"totalPerLevel"`
-	TopStudents   []TopStudent   `json:"topStudents"`
+	TotalPerType   map[string]int `json:"totalPerType"`
+	TotalPerLevel  map[string]int `json:"totalPerLevel"`
+	TotalPerPeriod map[string]int `json:"totalPerPeriod"`
+	TopStudents    []TopStudent   `json:"topStudents"`
+	Summary        StatsSummary   `json:"summary"`
+}
+
+type StatsSummary struct {
+	TotalAchievements int `json:"totalAchievements"`
+	TotalVerified     int `json:"totalVerified"`
+	TotalPending      int `json:"totalPending"`
+	TotalRejected     int `json:"totalRejected"`
+	TotalPoints       int `json:"totalPoints"`
 }
 
 type TopStudent struct {
@@ -406,9 +421,11 @@ type TopStudent struct {
 // GetStatistics generates overall stats
 func (r *AchievementRepository) GetStatistics(ctx context.Context) (*StatsResult, error) {
 	result := &StatsResult{
-		TotalPerType:  make(map[string]int),
-		TotalPerLevel: make(map[string]int),
-		TopStudents:   []TopStudent{},
+		TotalPerType:   make(map[string]int),
+		TotalPerLevel:  make(map[string]int),
+		TotalPerPeriod: make(map[string]int),
+		TopStudents:    []TopStudent{},
+		Summary:        StatsSummary{},
 	}
 
 	// 1. Total Per Type (Aggregation MongoDB)
@@ -505,15 +522,93 @@ func (r *AchievementRepository) GetStatistics(ctx context.Context) (*StatsResult
 		}
 	}
 
+	// 4. Total Per Period (Last 6 months)
+	pipelinePeriod := mongo.Pipeline{
+		{{Key: "$match", Value: bson.D{
+			{Key: "createdAt", Value: bson.D{
+				{Key: "$gte", Value: time.Now().AddDate(0, -6, 0)}, // Last 6 months
+			}},
+		}}},
+		{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: bson.D{
+				{Key: "year", Value: bson.D{{Key: "$year", Value: "$createdAt"}}},
+				{Key: "month", Value: bson.D{{Key: "$month", Value: "$createdAt"}}},
+			}},
+			{Key: "count", Value: bson.D{{Key: "$sum", Value: 1}}},
+		}}},
+		{{Key: "$sort", Value: bson.D{{Key: "_id", Value: 1}}}},
+	}
+
+	cursorPeriod, err := r.mongoColl.Aggregate(ctx, pipelinePeriod)
+	if err == nil {
+		var periodStats []struct {
+			ID struct {
+				Year  int `bson:"year"`
+				Month int `bson:"month"`
+			} `bson:"_id"`
+			Count int `bson:"count"`
+		}
+		if err = cursorPeriod.All(ctx, &periodStats); err == nil {
+			for _, s := range periodStats {
+				key := fmt.Sprintf("%d-%02d", s.ID.Year, s.ID.Month)
+				result.TotalPerPeriod[key] = s.Count
+			}
+		}
+	}
+
+	// 5. Summary Statistics (from PostgreSQL for accurate counts)
+	var totalAchievements, totalVerified, totalPending, totalRejected int
+
+	// Total achievements (exclude deleted)
+	r.pgDB.QueryRow("SELECT COUNT(*) FROM achievement_references WHERE status != 'deleted'").Scan(&totalAchievements)
+
+	// By status
+	r.pgDB.QueryRow("SELECT COUNT(*) FROM achievement_references WHERE status = 'verified'").Scan(&totalVerified)
+	r.pgDB.QueryRow("SELECT COUNT(*) FROM achievement_references WHERE status = 'submitted'").Scan(&totalPending)
+	r.pgDB.QueryRow("SELECT COUNT(*) FROM achievement_references WHERE status = 'rejected'").Scan(&totalRejected)
+
+	// Total points (from MongoDB)
+	var totalPoints int
+	pipelinePoints := mongo.Pipeline{
+		{{Key: "$match", Value: bson.D{{Key: "points", Value: bson.D{{Key: "$gt", Value: 0}}}}}},
+		{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: nil},
+			{Key: "totalPoints", Value: bson.D{{Key: "$sum", Value: "$points"}}},
+		}}},
+	}
+
+	cursorPoints, err := r.mongoColl.Aggregate(ctx, pipelinePoints)
+	if err == nil {
+		var pointsResult []struct {
+			TotalPoints int `bson:"totalPoints"`
+		}
+		if err = cursorPoints.All(ctx, &pointsResult); err == nil && len(pointsResult) > 0 {
+			totalPoints = pointsResult[0].TotalPoints
+		}
+	}
+
+	result.Summary = StatsSummary{
+		TotalAchievements: totalAchievements,
+		TotalVerified:     totalVerified,
+		TotalPending:      totalPending,
+		TotalRejected:     totalRejected,
+		TotalPoints:       totalPoints,
+	}
+
 	return result, nil
 }
 
 // GetStudentStatistics (Personal Stats)
 func (r *AchievementRepository) GetStudentStatistics(ctx context.Context, studentID string) (*StatsResult, error) {
 	result := &StatsResult{
-		TotalPerType: make(map[string]int),
+		TotalPerType:   make(map[string]int),
+		TotalPerLevel:  make(map[string]int),
+		TotalPerPeriod: make(map[string]int),
+		TopStudents:    []TopStudent{}, // Empty for individual stats
+		Summary:        StatsSummary{},
 	}
 
+	// 1. Total Per Type
 	pipeline := mongo.Pipeline{
 		{{Key: "$match", Value: bson.D{{Key: "studentId", Value: studentID}}}},
 		{{Key: "$group", Value: bson.D{
@@ -532,6 +627,110 @@ func (r *AchievementRepository) GetStudentStatistics(ctx context.Context, studen
 		for _, s := range stats {
 			result.TotalPerType[s.ID] = s.Count
 		}
+	}
+
+	// 2. Total Per Level (Competition only)
+	pipelineLevel := mongo.Pipeline{
+		{{Key: "$match", Value: bson.D{
+			{Key: "studentId", Value: studentID},
+			{Key: "achievementType", Value: "competition"},
+		}}},
+		{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: "$details.competitionLevel"},
+			{Key: "count", Value: bson.D{{Key: "$sum", Value: 1}}},
+		}}},
+	}
+
+	cursorLevel, err := r.mongoColl.Aggregate(ctx, pipelineLevel)
+	if err == nil {
+		var levelStats []struct {
+			ID    string `bson:"_id"`
+			Count int    `bson:"count"`
+		}
+		if err = cursorLevel.All(ctx, &levelStats); err == nil {
+			for _, s := range levelStats {
+				key := s.ID
+				if key == "" {
+					key = "unknown"
+				}
+				result.TotalPerLevel[key] = s.Count
+			}
+		}
+	}
+
+	// 3. Total Per Period (Last 12 months for individual)
+	pipelinePeriod := mongo.Pipeline{
+		{{Key: "$match", Value: bson.D{
+			{Key: "studentId", Value: studentID},
+			{Key: "createdAt", Value: bson.D{
+				{Key: "$gte", Value: time.Now().AddDate(-1, 0, 0)}, // Last 12 months
+			}},
+		}}},
+		{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: bson.D{
+				{Key: "year", Value: bson.D{{Key: "$year", Value: "$createdAt"}}},
+				{Key: "month", Value: bson.D{{Key: "$month", Value: "$createdAt"}}},
+			}},
+			{Key: "count", Value: bson.D{{Key: "$sum", Value: 1}}},
+		}}},
+		{{Key: "$sort", Value: bson.D{{Key: "_id", Value: 1}}}},
+	}
+
+	cursorPeriod, err := r.mongoColl.Aggregate(ctx, pipelinePeriod)
+	if err == nil {
+		var periodStats []struct {
+			ID struct {
+				Year  int `bson:"year"`
+				Month int `bson:"month"`
+			} `bson:"_id"`
+			Count int `bson:"count"`
+		}
+		if err = cursorPeriod.All(ctx, &periodStats); err == nil {
+			for _, s := range periodStats {
+				key := fmt.Sprintf("%d-%02d", s.ID.Year, s.ID.Month)
+				result.TotalPerPeriod[key] = s.Count
+			}
+		}
+	}
+
+	// 4. Summary Statistics for this student
+	var totalAchievements, totalVerified, totalPending, totalRejected int
+
+	// Get counts from PostgreSQL
+	r.pgDB.QueryRow("SELECT COUNT(*) FROM achievement_references WHERE student_id = $1 AND status != 'deleted'", studentID).Scan(&totalAchievements)
+	r.pgDB.QueryRow("SELECT COUNT(*) FROM achievement_references WHERE student_id = $1 AND status = 'verified'", studentID).Scan(&totalVerified)
+	r.pgDB.QueryRow("SELECT COUNT(*) FROM achievement_references WHERE student_id = $1 AND status = 'submitted'", studentID).Scan(&totalPending)
+	r.pgDB.QueryRow("SELECT COUNT(*) FROM achievement_references WHERE student_id = $1 AND status = 'rejected'", studentID).Scan(&totalRejected)
+
+	// Total points for this student
+	var totalPoints int
+	pipelinePoints := mongo.Pipeline{
+		{{Key: "$match", Value: bson.D{
+			{Key: "studentId", Value: studentID},
+			{Key: "points", Value: bson.D{{Key: "$gt", Value: 0}}},
+		}}},
+		{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: nil},
+			{Key: "totalPoints", Value: bson.D{{Key: "$sum", Value: "$points"}}},
+		}}},
+	}
+
+	cursorPoints, err := r.mongoColl.Aggregate(ctx, pipelinePoints)
+	if err == nil {
+		var pointsResult []struct {
+			TotalPoints int `bson:"totalPoints"`
+		}
+		if err = cursorPoints.All(ctx, &pointsResult); err == nil && len(pointsResult) > 0 {
+			totalPoints = pointsResult[0].TotalPoints
+		}
+	}
+
+	result.Summary = StatsSummary{
+		TotalAchievements: totalAchievements,
+		TotalVerified:     totalVerified,
+		TotalPending:      totalPending,
+		TotalRejected:     totalRejected,
+		TotalPoints:       totalPoints,
 	}
 
 	return result, nil
